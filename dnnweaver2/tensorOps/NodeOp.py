@@ -5,7 +5,7 @@ from dnnweaver2.scalar.dtypes import FQDtype
 
 class NodeOp(object):
     __metaclass__ = abc.ABCMeta
-    def __init__(self, node_name, input_tensors=None):
+    def __init__(self, node_name, input_tensors=None, output_tensors=None):
         self.graph = get_default_graph()
         self.op_type = self._get_op_type()
         self.name = self.graph.get_op_name(node_name, self.op_type)
@@ -28,7 +28,10 @@ class NodeOp(object):
         # print('## Creating op with name {} and inputs {}'.format(node_name, input_str))
 
         self.input_tensors = input_tensors
-        self.output_tensors = self._create_output_tensors(self.name)
+	if output_tensors==None:
+        	self.output_tensors = self._create_output_tensors(self.name)
+	else:
+		self.output_tensors = output_tensors
         
         self.input_loss = [None]*len(input_tensors)
 

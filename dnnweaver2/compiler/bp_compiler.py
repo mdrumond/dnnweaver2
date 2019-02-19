@@ -2,7 +2,7 @@ from dnnweaver2.tensorOps.cnn import *
 from dnnweaver2.graph import Graph
 from dnnweaver2.tensor import Tensor
 
-from dnnweaver2.optimizer.optimizer import optimize_for_order, get_stats_fast
+from dnnweaver2.optimizer.optimizer import optimize_for_order_bp, get_stats_fast_bp
 from dnnweaver2.isa import *
 from dnnweaver2.isa import ScratchPad, AccessType
 
@@ -45,7 +45,7 @@ class FPGAMemoryManager(object):
 
 class MacroNode(object):
     def __init__(self, op):
-        assert isinstance(op, Convolution)
+        assert isinstance(op, Convolution) or isinstance(op, Convolution_BP)
         self.sys_array_op = op
         self.pu_op = []
         self.name = op.name
@@ -54,36 +54,39 @@ class MacroNode(object):
         self.pu_op.append(op)
         self.name = '{}+{}'.format(self.name, op.name)
 
-class GraphCompiler(object):
+class BP_GraphCompiler(object):
 
     def __init__(self, fpga_spec=None, log_level=logging.INFO):
         self.log = logging.getLogger('Graph Compiler')
         self.log.setLevel(log_level)
-        self.fpga_spec = fpga_spec
-        if self.fpga_spec is not None:
-            assert isinstance(self.fpga_spec, FPGASpec)
-            self.fpga_manager = FPGAMemoryManager(self.fpga_spec, log_level=log_level)
-        else:
-            self.fpga_sepc = FPGASpec()
-            self.fpga_manager = FPGAMemoryManager(self.fpga_spec, log_level=log_level)
-        self.pu_compiler = PUCompiler(self.fpga_manager, log_level=self.log.level)
         self.conv_tiling = OrderedDict()
 
     def optimize_tiling(self, op, graph, acc_obj, pool_kernel=None, pool_stride=None):
-        K = op.weights.fpga_shape[-2]
-        O = op.output_tensors.fpga_shape[-2]
-        S = op.stride[-1]
-        IC = op.weights.fpga_shape[-1]
-        OC = op.weights.fpga_shape[-4]
-        B = op.data.fpga_shape[-4]
+	#data shape=(B, IH, IW, IC)
+	#weight shape=(B, OH, OW, OC)
+	#output shape=(B, KH, KW, IC, OC)
+
+
+        IC = op.data.shape[-1]
+	IW = op.data.shape[-2]
+	IH = op.data.shape[-3]
+	B = op.data.shape[-4]
+	S = op.stride[-1]
+	OC = op.weights.shape[-1]
+	KW = op.output.shape[-3]
+	KH = op.output.shape[-4]
+
+	OH = op.weights.shape[-3]
+	OW = op.weights.shape[-2]
+
         im2col = False
 
 	prec = acc_obj.prec
 
         # set energy cost to 0 since this version of the compiler is optimized for performance
         energy_cost = (0,0,0,0,0,0,0,0,0,0)
-        conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
-        tiling, order, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=pool_kernel, pool_stride=pool_stride)
+        conv_params = (acc_obj, IC, IW, IH, B, S, OC, OW, OH, KW, KH, prec, im2col, energy_cost)
+        tiling, order, stats = optimize_for_order_bp(conv_params, sequential=False, pool_kernel=pool_kernel, pool_stride=pool_stride)
 
         # Convert tiling and order to an ordered dict
         best_tiling = OrderedDict()
@@ -91,8 +94,8 @@ class GraphCompiler(object):
             best_tiling[o] = tiling[o]
 
         # We don't tile the KH/KW loops
-        best_tiling['KH/kh'] = (1, K)
-        best_tiling['KW/kw'] = (1, K)
+        #best_tiling['KH/kh'] = (1, K)
+        #best_tiling['KW/kw'] = (1, K)
         return best_tiling, stats
 
     def _alloc_tensor(self, graph):
@@ -414,7 +417,6 @@ class GraphCompiler(object):
         pass
 
     def compile(self, graph, acc_obj):
-
         array_n, array_m = acc_obj.N, acc_obj.M
         assert isinstance(graph, Graph)
         inst_binary = []
@@ -425,7 +427,7 @@ class GraphCompiler(object):
         curr_node = None
         for opname, op in graph.op_registry.iteritems():
             self.log.debug('\t{}'.format(opname))
-            if isinstance(op, Convolution):
+            if isinstance(op, Convolution_BP):
                 if curr_node is None:
                     curr_node = MacroNode(op)
                 else:
@@ -482,6 +484,8 @@ class GraphCompiler(object):
                 self.log.debug('\t\t{}'.format(op.name))
 
             self.log.debug('Optimizing tiling for Convolution layer {}'.format(macro_node.sys_array_op.name))
+
+
             pool_stride = None
             pool_kernel = None
             for op in macro_node.pu_op:
@@ -489,6 +493,8 @@ class GraphCompiler(object):
                     pool_pad = op.pad
                     pool_stride = op.stride
                     pool_kernel = op.pooling_kernel
+		    print('Pooling kernel: {} {}'.format(pool_kernel[0],pool_kernel[1]))
+
             optimal_tiling, stats = self.optimize_tiling(macro_node.sys_array_op, graph, acc_obj, pool_stride=pool_stride, pool_kernel=pool_kernel)
             self.conv_tiling[macro_node.sys_array_op] = optimal_tiling
             self.log.debug('Optimal tiling and ordering:')
@@ -496,13 +502,6 @@ class GraphCompiler(object):
             for loop, tile in optimal_tiling.iteritems():
                 self.log.debug('{}Loop: {:>6}, Tile: {}'.format(indent * '==', loop, tile))
                 indent += 1
-
-            last = i == len(macro_node_array) - 1
-            self.log.debug('Allocating tensors for macro op: {}'.format(macro_node.name))
-            self._alloc_tensor(graph)
-            inst_array = self._conv_compile(conv_op=macro_node.sys_array_op, pu_op=macro_node.pu_op, tiling=optimal_tiling, array_n=array_n, array_m=array_m, last=last)
-            inst_binary.append(InstructionBlock(macro_node, inst_array))
-            self.log.debug('#'*50)
 
         self.log.debug('Compiling macro ops - done!')
 

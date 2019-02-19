@@ -130,6 +130,79 @@ class Convolution(NodeOp):
         self.weights.data = params["weights"]
         self.bias.data = params["bias"]
 
+class Convolution_BP(NodeOp):
+    def __init__(self, data, weights, output, node_name, pad='SAME', stride=None, group=1, dtype=FQDtype.FP32):
+
+        #shape=(B, IH, IW, IC)
+        self.data = data
+
+        #shape=(B, OH, OW, OC)
+        self.weights = weights
+
+	#shape=(B, KH, KW, IC, OC)
+	self.output = output
+
+	assert self.data.shape[-4] == self.weights.shape[-4] , 'Data and weight batch size do not match'
+	assert self.data.shape[-4] == self.output.shape[-5] , 'Data and output batch size do not match'
+	assert self.data.shape[-1] == self.output.shape[-2] , 'Data and output IC size do not match'
+	assert self.weights.shape[-1] == self.output.shape[-1] , 'weight and output OC size do not match'
+
+        # Stride
+        if stride is None:
+            stride = (1,1,1,1)
+        assert len(stride) == len(self.data.shape)
+        self.stride = stride
+
+        # Padding
+        if pad == 'SAME':
+            self.pad = (
+                    (0,0),
+                    (self.output.shape[-4]//2, self.output.shape[-4]//2),
+                    (self.output.shape[-3]//2, self.output.shape[-3]//2),
+                    (0,0)
+                    )
+        elif pad == 'VALID':
+            self.pad = ((0,0), (0,0), (0,0), (0,0))
+        else:
+            assert len(pad) == 2
+            self.pad = pad
+
+        # Group
+        self.group = group
+
+        input_tensors = (data, weights)
+        self.dtype=dtype
+        super(Convolution_BP, self).__init__(node_name=node_name, input_tensors=input_tensors, output_tensors=output)
+
+    def _get_output_shape(self):
+        return tuple(self.output.shape)
+
+    def _get_output_dtype(self):
+        total_bits = 64
+        total_frac_bits = self.data.dtype.frac_bits + self.weights.dtype.frac_bits
+        return FixedPoint(total_bits, total_frac_bits)
+
+    def get_ops(self):
+        num = 1
+        for i in range(len(self.data.shape)-3):
+            num *= self.data.shape[i]
+
+        cout = self.output_tensors.shape[-1]
+        cin = self.data.shape[-1]
+        hout = self.output_tensors.shape[-3]
+        wout = self.output_tensors.shape[-2]
+
+        hfil = self.weights.shape[-3]
+        wfil = self.weights.shape[-2]
+
+        mac = (wfil * hfil * cin * \
+                cout * hout * wout * \
+                num) // self.group
+
+        dtypes = (self.data.dtype, self.weights.dtype, self.output_tensors.dtype)
+
+        return {Ops.MAC(dtypes): mac}
+
 class ConvolutionBackprop(GradOp):
     def __init__(self, data, weights, output_loss, node_name, pad='SAME', stride=None, group=1, dtype=None):
         self.data = data
@@ -1067,6 +1140,11 @@ def addBias(i, b, dim, name=None, dtype=None):
 def conv2D(i, w, b, name=None, stride=None, pad='SAME', group=1, dtype=None):
     g = get_default_graph()
     op = Convolution(i, w, b, name, stride=stride, pad=pad, group=group, dtype=dtype)
+    return typecast(op.output_tensors, dtype)
+
+def conv2D_bp(i, w, o, name=None, stride=None, pad='SAME', group=1, dtype=None):
+    g = get_default_graph()
+    op = Convolution_BP(i, w, o, name, stride=stride, pad=pad, group=group, dtype=dtype)
     return typecast(op.output_tensors, dtype)
 
 def maxPool(i, pooling_kernel, stride=(1,2,2,1), pad='VALID', name=None, dtype=None):

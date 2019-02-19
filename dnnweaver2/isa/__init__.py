@@ -1,5 +1,6 @@
 import math
 
+import logging
 
 class OPCodes:
     SETUP       = 0
@@ -37,6 +38,9 @@ class FNCodes:
     MAX       = 5
     MIN       = 6
     RSHIFT    = 7
+
+
+log = logging.getLogger('Graph Compiler')
 
 
 class ComputeInstruction(object):
@@ -101,18 +105,18 @@ class ComputeInstruction(object):
         return self._fn_to_str(src0, src1, dest)
 
     def get_binary(self):
-        b = self.dest_addr
-        b += self.src0_addr << 4
+        b = self.dest_addr #0-1-2-3
+        b += self.src0_addr << 4 #4-5-6-7
         if self.src1_sel == 1:
             b += self.imm << 8
             # print(self.imm)
         else:
-            b += self.src1_addr << 8
+            b += self.src1_addr << 8 # 8-9...-23
             # print(self.src1_addr)
         # print(b)
-        b+= self.fn << 24
-        b+= self.src1_sel << 27
-        b+= self.op_code << 28
+        b+= self.fn << 24 #24-25-26
+        b+= self.src1_sel << 27 #27
+        b+= self.op_code << 28 #28-29-30-31
         return b
 
 class ComputeNop(ComputeInstruction):
@@ -169,10 +173,11 @@ class BFInstruction(object):
         assert self.op_spec   >= 0 and self.op_spec   < (1 << 6)
         assert self.loop_id   >= 0 and self.loop_id   < (1 << 5)
         assert self.immediate >= 0 and self.immediate < (1 << 16)
-        binary = self.op_code << 28
-        binary+= self.op_spec << 21
-        binary+= self.loop_id << 16
-        binary+= self.immediate
+        binary = self.op_code << 28 #28-29-30-31
+        binary+= self.op_spec << 21 #21-22-23-24-25-26-27
+        binary+= self.loop_id << 16 #16-17-18-19-20
+        binary+= self.immediate #0-15
+	#log.debug('BF instruction binary {0:032b}'.format(binary))
         return binary
 
 class PUBlockStart(BFInstruction):
@@ -180,15 +185,16 @@ class PUBlockStart(BFInstruction):
         BFInstruction.__init__(self, OPCodes.PU_BLOCK, 0, 0, num_instructions)
 
 class BaseAddressInstruction(BFInstruction):
-
     def __init__(self, scratchpad_ID, index, address):
-        # print('Scratchpad: {}; address: {}'.format(scratchpad_ID, address))
+        #print('Scratchpad: {0:032b}; address: {0:032b}'.format(scratchpad_ID, address))
         self.scratchpad_ID = scratchpad_ID
         self.index = index
         self.address = address
+	#A: This part might be buggy. Because I think they want to split address 21bit-21bit, and 16-bit should go to immediate, 5-bit to loop_id. This does not happen here.  
         addr_index = (address >> (index*21))
         immediate = addr_index % (1 << 21)
         loop_id = addr_index >> 16
+	#print('Imm: {0:032b}; loopid: {0:032b}'.format(immediate, loop_id))
         op_spec = self.scratchpad_ID << 3
         op_spec += self.index
         BFInstruction.__init__(self, OPCodes.BASE_ADDR, op_spec, 0, immediate)
@@ -264,11 +270,12 @@ class SetupInstruction(BFInstruction):
         self.op1_bitwidth = op1_bitwidth
         self.op0_bitwidth_spec = int(math.log(op0_bitwidth) / math.log(2))
         self.op1_bitwidth_spec = int(math.log(op1_bitwidth) / math.log(2))
-        op_spec = self.op0_bitwidth_spec << 3
-        op_spec += self.op1_bitwidth_spec << 0
+        op_spec = self.op0_bitwidth_spec << 3 #3-4-5-6
+        op_spec += self.op1_bitwidth_spec << 0 #0-1-2
         BFInstruction.__init__(self, OPCodes.SETUP, op_spec, 0, 0)
 
     def get_binary(self):
+	#A: This part is not necessary except return?
         op_spec = self.op0_bitwidth_spec << 3
         op_spec += self.op1_bitwidth_spec << 0
         self.op_spec = op_spec

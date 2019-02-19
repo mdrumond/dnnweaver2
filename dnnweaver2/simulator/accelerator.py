@@ -34,7 +34,7 @@ class Accelerator(object):
         return ceil_a_by_b(size, self.mem_if_width)
 
 
-    def get_compute_stats(self, ic, oc, ow, oh, b, kw, kh, iprec, wprec, im2col=False):
+    def get_compute_stats(self, ic, oc, ow, oh, b, kw, kh, im2col=False):
         """
         Compute instruction
         args:
@@ -51,13 +51,11 @@ class Accelerator(object):
         compute_stats = Stats()
         compute_stats.total_cycles = self.get_compute_cycles(ic, oc, ow, oh,
                                                              b, kw, kh,
-                                                             iprec,
-                                                             wprec,
                                                              im2col)
         return compute_stats
 
 
-    def get_compute_cycles(self, ic, oc, ow, oh, b, kw, kh, iprec, wprec, im2col=False):
+    def get_compute_cycles(self, ic, oc, ow, oh, b, kw, kh, im2col=False):
         """
         Compute instruction
         args:
