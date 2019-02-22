@@ -22,13 +22,6 @@ tile_deps['OH/oh'] = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False
 tile_deps['IC/ic'] = {'ibuf': True,  'wbuf': True,  'obuf': False, 'bbuf': False}
 tile_deps['OC/oc'] = {'ibuf': False, 'wbuf': True,  'obuf': True,  'bbuf': True}
 
-tile_deps_bp = {}
-tile_deps_bp['B/b']   = {'ibuf': True,  'wbuf': True, 'obuf': True}
-tile_deps_bp['OW/ow'] = {'ibuf': True,  'wbuf': True, 'obuf': False}
-tile_deps_bp['OH/oh'] = {'ibuf': True,  'wbuf': True, 'obuf': False}
-tile_deps_bp['IC/ic'] = {'ibuf': True,  'wbuf': False,  'obuf': True}
-tile_deps_bp['OC/oc'] = {'ibuf': False, 'wbuf': True,  'obuf': True}
-
 
 def get_stats_fast(conv_params, tiling, order_type, verbose=False):
     """
@@ -78,8 +71,8 @@ def get_stats_fast(conv_params, tiling, order_type, verbose=False):
     max_read_size = {}
     for namespace in writes:
         max_write_size[namespace] = writes[namespace]
-        if verbose:
-            print('{}: {:,} bits'.format(namespace, max_write_size[namespace]))
+        #if verbose:
+            #print('{}: {:,} bits'.format(namespace, max_write_size[namespace]))
     for namespace in reads:
         max_read_size[namespace] = reads[namespace]
 
@@ -367,13 +360,13 @@ def optimize_for_order_bp(conv_params, pool_kernel=None, pool_stride=None, seque
     order = set(permutations(loops))
 
     return_dict = {}
-    acc_obj, IC, IW, IH, B, S, OC,  OW, OH, KW, KH, prec, im2col, energy_cost = conv_params
+    acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost = conv_params
 
     if pool_kernel is None:
         pool_kernel = (1,1,1,1)
     if pool_stride is None:
         pool_stride = (1,1,1,1)
-    conv_params_with_pool = acc_obj, IC, IW, IH, B, S, OC, OW, OH, KW, KH, prec, im2col, energy_cost, pool_kernel, pool_stride
+    conv_params_with_pool = acc_obj, K, O, S, IC, OC, B, im2col, energy_cost, pool_kernel, pool_stride
 
     if not sequential:
         _bound_optimizer_method = functools.partial(_optimize_for_order_bp, conv_params_with_pool)
@@ -429,27 +422,14 @@ def _optimize_for_order_bp(conv_params, order_type, verbose=False):
     """
 
     
-    acc_obj, IC, IW, IH, B, S, OC, OW, OH, KW, KH, prec, im2col, energy_cost, pool_kernel, pool_stride = conv_params
+    acc_obj, K, O, S, IC, OC, B, im2col, energy_cost, pool_kernel, pool_stride = conv_params
 
-    #I = (O - 1) * S + K
-
-    assert IH==IW, 'unsquare input isnt implemented'
-    assert KH==KW, 'unsquare output isnt implemented'
-    K = KH
-
-    #OH = (IH - K) / S + 1
-    #OW = (IW - K) / S + 1
-    O = OH
-
-    #pool_O = (O - pool_kernel[1]) / pool_stride[1] + 1
-
-    # print('Pool output: {}'.format(pool_O))
+    I = O * S
 
     # We do not tile the "K" dimension and compute an entire 2-D conv at a time
     num_O_tiles = int(math.ceil(log2(O))) + 1
     num_IC_tiles = int(math.ceil(log2(IC))) + 1
     num_OC_tiles = int(math.ceil(log2(OC))) + 1
-
     num_B_tiles = int(math.ceil(log2(B))) + 1
 
     best_cycles = None
@@ -480,13 +460,8 @@ def _optimize_for_order_bp(conv_params, order_type, verbose=False):
                 num_ic = ceil_a_by_b(IC, ic)
 
                 for _oc in range(num_OC_tiles):
-                    if im2col:
-                        oc = min((1 << _oc), OC)
-                    else:
-                        oc = min((1 << _oc), OC)
-
+                    oc = min((1 << _oc), OC)
                     num_oc = ceil_a_by_b(OC, oc)
-
 
                     tiling = {}
                     tiling['B/b'] = (num_b, b)
@@ -513,15 +488,22 @@ def _optimize_for_order_bp(conv_params, order_type, verbose=False):
 
     return (best_tiling, best_order, best_cycles, best_energy, stats)
 
+
+tile_deps_bp = {}
+tile_deps_bp['B/b']   = {'ibuf': True,  'wbuf': False, 'obuf': True}
+tile_deps_bp['OW/ow'] = {'ibuf': True,  'wbuf': False, 'obuf': True}
+tile_deps_bp['OH/oh'] = {'ibuf': True,  'wbuf': False, 'obuf': True}
+tile_deps_bp['IC/ic'] = {'ibuf': True,  'wbuf': True,  'obuf': False}
+tile_deps_bp['OC/oc'] = {'ibuf': False, 'wbuf': True,  'obuf': True}
+
 def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
     """
     Returns cycles and memory accesses to DRAM, IBUF, OBUF, and WBUF
         TODOs: Without im2col, the calculation of weight and ibuf size is inexact
     """
-    acc_obj, IC, IW, IH, B, S, OC, OW, OH, KW, KH, prec, im2col, energy_cost, pool_kernel, pool_stride = conv_params
+    acc_obj, K, O, S, IC, OC, B, im2col, energy_cost, pool_kernel, pool_stride = conv_params
 
-    iprec, wprec, bprec, oprec = prec
-
+    iprec, wprec, bprec, oprec = acc_obj.prec
 
     num_b, b = tiling['B/b']
     num_ow, ow = tiling['OW/ow']
@@ -529,22 +511,22 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
     num_ic, ic = tiling['IC/ic']
     num_oc, oc = tiling['OC/oc']
 
-    kw = KW
-    kh = KH
+    kw = K
+    kh = K
 
-    ih = kh + (oh*pool_kernel[0] - 1) * S
-    iw = kw + (ow*pool_kernel[1] - 1) * S
+    ih = kh + (oh - 1) * S
+    iw = kw + (ow - 1) * S
     
-
     writes = {}
     reads = {}
 
-    writes['wbuf'] = ceil_a_by_b(oc, acc_obj.N) * acc_obj.N * oh * ow * b * wprec
+    writes['wbuf'] =  ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * wprec
     
     writes['ibuf'] = iw * ih * ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * b * iprec
 
-    writes['obuf'] = kw * kh * ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * b * oprec
-    reads['obuf'] = kw * kh * ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * b * oprec
+    writes['obuf'] = ow * oh * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * b * oprec
+
+    reads['wbuf'] = ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * wprec
 
     # Skip if overutilizing resources
     overflow = False
@@ -558,8 +540,8 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
     max_read_size = {}
     for namespace in writes:
         max_write_size[namespace] = writes[namespace]
-        if verbose:
-            print('{}: {:,} bits'.format(namespace, max_write_size[namespace]))
+        #if verbose:
+            #print('{}: {:,} bits'.format(namespace, max_write_size[namespace]))
     for namespace in reads:
         max_read_size[namespace] = reads[namespace]
 
@@ -572,7 +554,7 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
 
 
     rd_cache_hit = {'wbuf': True, 'ibuf': True, 'obuf': True}
-    wr_cache_hit = {'obuf': True}
+    wr_cache_hit = {'wbuf': True}
     if verbose:
         logger.debug('Initialize reads/writes')
         logger.debug('\tim2col: {}'.format(im2col))
@@ -637,7 +619,7 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
             logger.debug('SRAM access order: Input Stationary')
         stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * iprec
         stats.reads['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * oprec
+        stats.writes['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * wprec
         stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * wprec
 
     elif os_energy == min_energy:
@@ -645,7 +627,7 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
             logger.debug('SRAM access order: Output Stationary')
         stats.reads['ibuf'] += num_tiles * (oc * oh * ow * b) * (kw * kh * ic) * iprec
         stats.reads['obuf'] += num_tiles * (oc * oh * ow * b) * oprec
-        stats.writes['obuf'] += num_tiles * (oc * oh * ow * b) * oprec
+        stats.writes['wbuf'] += num_tiles * (oc * oh * ow * b) * (kw * kh * ic) * wprec
         stats.reads['wbuf'] += num_tiles * (oc * oh * ow * b) * (kw * kh * ic) * wprec
 
     else:
@@ -653,7 +635,7 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
             logger.debug('SRAM access order: Weight Stationary')
         stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oc) * (b * ow * oh) * iprec
         stats.reads['obuf'] += num_tiles * (kw * kh * ic * oc) * (b * ow * oh) * oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oc) * (b * ow * oh) * oprec
+        stats.writes['wbuf'] += num_tiles * (kw * kh * ic * oc) * wprec
 	stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oc) * wprec
 
     # TODO: update
@@ -670,7 +652,6 @@ def get_stats_fast_bp(conv_params, tiling, order_type, verbose=False):
     stats.middle_dram_accesses = stats.total_dram_accesses - stats.initial_dram_reads - stats.final_dram_writes
 
     if verbose:
-	    logger.debug('Compute cycle per tile : {:>20,}'.format(acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh, im2col)))
 	    logger.debug('# of tiles : {:>20,}'.format(num_tiles))
     stats.compute_cycles = num_tiles * acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh, im2col)
     stats.memory_cycles_required = ceil_a_by_b(stats.middle_dram_accesses, acc_obj.mem_if_width)

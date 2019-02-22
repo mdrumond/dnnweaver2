@@ -130,6 +130,116 @@ class Convolution(NodeOp):
         self.weights.data = params["weights"]
         self.bias.data = params["bias"]
 
+class FC(NodeOp):
+    def __init__(self, data, weights, bias, node_name, pad='SAME', stride=None, group=1, dtype=FQDtype.FP32):
+
+        # Input data >3D
+        self.data = data
+
+        # Weights data 4D
+        self.weights = weights
+        assert len(self.weights.shape) == 4
+        if len(self.data.shape) < 3:
+            input_channels = 1
+        else:
+            input_channels = self.data.shape[-1]
+        assert self.weights.shape[-1] == input_channels, 'Expected {} input channels in weights, got {}'.format(input_channels, self.weights.shape[-1])
+
+        # Bias data 1D
+        # if bias.dtype != self._get_output_dtype():
+            # # bias = TypeCastOp(bias, self._get_output_dtype(), node_name='bias-typecast').output_tensors
+        # assert bias.dtype == self._get_output_dtype()
+
+        self.bias = bias
+        assert len(bias.shape) == 1
+        assert bias.shape[0] == weights.shape[-4], 'Bias shape {} does not match weights shape {}'.format(bias.shape, weights.shape)
+
+        # Stride
+        if stride is None:
+            stride = (1,1,1,1)
+        assert len(stride) == len(self.data.shape)
+        self.stride = stride
+
+        # Padding
+        if pad == 'SAME':
+            self.pad = (
+                    (0,0),
+                    (self.weights.shape[-3]//2, self.weights.shape[-3]//2),
+                    (self.weights.shape[-2]//2, self.weights.shape[-2]//2),
+                    (0,0)
+                    )
+        elif pad == 'VALID':
+            self.pad = ((0,0), (0,0), (0,0), (0,0))
+        else:
+            assert len(pad) == 2
+            self.pad = pad
+
+        # Group
+        self.group = group
+
+        input_tensors = (data, weights, bias)
+        self.dtype=dtype
+        super(FC, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _get_output_shape(self):
+        cout = self.weights.shape[-4]
+        hout = (self.data.shape[-3] - self.weights.shape[-3] + self.pad[-3][0] + self.pad[-3][1]) // self.stride[-3] + 1
+        wout = (self.data.shape[-2] - self.weights.shape[-2] + self.pad[-2][0] + self.pad[-2][1]) // self.stride[-2] + 1
+        out_shape = []
+        for i in range(len(self.data.shape)-3):
+            out_shape.append(self.data.shape[i])
+        out_shape.append(hout)
+        out_shape.append(wout)
+        out_shape.append(cout)
+        return tuple(out_shape)
+
+    def _get_output_dtype(self):
+        total_bits = 64
+        total_frac_bits = self.data.dtype.frac_bits + self.weights.dtype.frac_bits
+        return FixedPoint(total_bits, total_frac_bits)
+
+    def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
+        self.output_loss = self._get_incoming_gradients(y, grad_dtype)
+
+        assert x in self.input_tensors, 'Op: {}, x: {}'.format(self.name, x.name)
+        if x == self.data:
+            if self.input_loss[0] is None:
+                op = ConvolutionBackprop(data=self.data, weights=self.weights, output_loss=self.output_loss, pad=self.pad, stride=self.stride, group=self.group, node_name=self.name, dtype=grad_dtype)
+                self.input_loss[0] = op.output_tensors
+            return self.input_loss[0]
+        else:
+            if self.input_loss[1] is None:
+                op = ConvolutionGradient(data=self.data, weights=self.weights, output_loss=self.output_loss, pad=self.pad, stride=self.stride, group=self.group, node_name=self.name, dtype=grad_dtype)
+                self.input_loss[1] = op.output_tensors
+
+            return self.input_loss[1]
+
+    def get_ops(self):
+        num = 1
+        for i in range(len(self.data.shape)-3):
+            num *= self.data.shape[i]
+
+        cout = self.output_tensors.shape[-1]
+        cin = self.data.shape[-1]
+        hout = self.output_tensors.shape[-3]
+        wout = self.output_tensors.shape[-2]
+
+        hfil = self.weights.shape[-3]
+        wfil = self.weights.shape[-2]
+
+        mac = (wfil * hfil * cin * \
+                cout * hout * wout * \
+                num) // self.group
+
+        dtypes = (self.data.dtype, self.weights.dtype, self.output_tensors.dtype)
+
+        return {Ops.MAC(dtypes): mac}
+
+    def load_params(self, params):
+        self.weights.data = params["weights"]
+        self.bias.data = params["bias"]
+
+
 class Convolution_BP(NodeOp):
     def __init__(self, data, weights, output, node_name, pad='SAME', stride=None, group=1, dtype=FQDtype.FP32):
 
@@ -561,7 +671,7 @@ class ConcatBackprop(GradOp):
         return {}
 
 class Add(NodeOp):
-    def __init__(self, data, node_name, dtype=None):
+    def __init__(self, data, node_name='Add', dtype=None):
 
         self.data = tuple(data)
         input_tensors = data
@@ -594,6 +704,37 @@ class Add(NodeOp):
                     self.input_loss[i] = op.output_tensors
                 return self.input_loss[i]
 
+
+    def get_ops(self):
+        return {}
+
+class Fork(NodeOp):
+    def __init__(self, data, node_name='Fork', dtype=None):
+
+        self.data = data
+        input_tensors = data
+
+        if dtype is None:
+            dtype = data.dtype
+
+        self.dtype=dtype
+        super(Fork, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _get_output_shape(self):
+        return self.data.shape
+
+    def _get_output_dtype(self):
+        return self.data.dtype
+
+    def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
+        self.output_loss = self._get_incoming_gradients(y, grad_dtype=grad_dtype)
+        assert x in self.data, 'Op: {}, x: {}'.format(self.name, x.name)
+        for i in range(len(self.data)):
+            if x == self.data[i]:
+                if self.input_loss[i] is None:
+                    op = AddBackprop(data=self.data[i], output_loss=self.output_loss, node_name=self.name, dtype=grad_dtype)
+                    self.input_loss[i] = op.output_tensors
+                return self.input_loss[i]
 
     def get_ops(self):
         return {}
@@ -998,6 +1139,28 @@ class MulVector(NodeOp):
         raise ValueError
         return {}
 
+class ReLU(NodeOp):
+    def __init__(self, data, node_name, dtype=None):
+        self.data = data
+
+        input_tensors = (data)
+        self.dtype=dtype
+        super(ReLU, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _get_output_shape(self):
+        return self.data.shape
+
+    def _get_output_dtype(self):
+        return self.data.dtype
+
+    def get_ops(self):
+        mul_dtypes = (self.data.dtype, FixedPoint(16, 15))
+        rshift_dtype = FixedPoint(self.data.dtype.bits + 16, self.data.dtype.frac_bits + 15)
+        cmp_dtypes = (self.data.dtype)
+        return {Ops.MUL(mul_dtypes): self.data.size,
+                Ops.RSHIFT(rshift_dtype): self.data.size,
+                Ops.CMP(cmp_dtypes): self.data.size}
+
 class LeakyReLU(NodeOp):
     def __init__(self, data, scalar, node_name, dtype=None):
         self.data = data
@@ -1078,8 +1241,43 @@ class Reorg(NodeOp):
     def get_ops(self):
         return {}
 
+class BNorm(NodeOp):
+    def __init__(self, data, gamma, beta, eps=1e-16, node_name='BNorm', dtype=None):
+        # Input data
+        self.data = data
+	self.gamma = gamma
+	self.beta = beta
+
+        self.eps = eps
+
+	for i in range(1,len(data.shape)):
+		assert data.shape[i]==gamma.shape[i], 'Shape mismatch for gamma'
+		assert data.shape[i]==beta.shape[i], 'Shape mismatch for beta'
+
+        input_tensors = (data, gamma, beta)
+	if dtype==None:
+		self.dtype=data.dtype
+	else:
+        	self.dtype=dtype
+        super(BNorm, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _get_output_shape(self):
+        return self.data.shape
+
+    def _get_output_dtype(self):
+        return self.dtype
+
+    def get_ops(self):
+        ops = self.data.size
+        sub_dtypes = (self.data.dtype, self.gamma.dtype)
+        mul_dtypes = (self.data.dtype, self.beta.dtype)
+        return {Ops.SUB(sub_dtypes): ops, Ops.MUL(sub_dtypes): ops}
+
+    #def load_params(self, params):
+            
+
 class BatchNorm(NodeOp):
-    def __init__(self, data, mean, scale, eps, node_name, dtype=FQDtype.FP32):
+    def __init__(self, data, mean, scale, eps, node_name='BatchNorm', dtype=FQDtype.FP32):
 
         # Input data
         self.data = data
@@ -1142,6 +1340,11 @@ def conv2D(i, w, b, name=None, stride=None, pad='SAME', group=1, dtype=None):
     op = Convolution(i, w, b, name, stride=stride, pad=pad, group=group, dtype=dtype)
     return typecast(op.output_tensors, dtype)
 
+def fc(i, w, b, name=None, stride=None, pad='SAME', group=1, dtype=None):
+    g = get_default_graph()
+    op = FC(i, w, b, name, stride=stride, pad=pad, group=group, dtype=dtype)
+    return typecast(op.output_tensors, dtype)
+
 def conv2D_bp(i, w, o, name=None, stride=None, pad='SAME', group=1, dtype=None):
     g = get_default_graph()
     op = Convolution_BP(i, w, o, name, stride=stride, pad=pad, group=group, dtype=dtype)
@@ -1178,6 +1381,14 @@ def batch_norm(data, mean, scale, eps=0.000001, name=None, dtype=None):
     op = BatchNorm(data, mean, scale, eps=eps, node_name=name, dtype=dtype)
     return typecast(op.output_tensors, dtype)
 
+def b_norm(data, gamma, beta, eps=1e-16, name=None, dtype=None):
+    op = BNorm(data, gamma, beta, eps=eps, node_name=name, dtype=dtype)
+    return typecast(op.output_tensors, dtype)
+
+def reLU(data, name=None, dtype=None):
+    op = ReLU(data, node_name=None)
+    return typecast(op.output_tensors, dtype)
+
 def leakyReLU(data, name=None, alpha=0.1, dtype=None):
     if not isinstance(alpha, Tensor):
         alpha = get_tensor(shape=(1), name='alpha', data=alpha)
@@ -1187,3 +1398,8 @@ def leakyReLU(data, name=None, alpha=0.1, dtype=None):
 def reorg(data, reorg_kernel, name=None, dtype=None):
     op = Reorg(data, reorg_kernel, name, dtype=dtype)
     return typecast(op.output_tensors, dtype)
+
+def fork(data, name=None, dtype=None):
+    op = Fork(data, name, dtype=dtype)
+    return typecast(op.output_tensors, dtype)
+
