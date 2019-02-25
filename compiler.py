@@ -30,7 +30,7 @@ def compile_graph(dir_name, graph, acc_obj):
 	tid = 0
 	for i in graph.tensor_registry:
 		logger.debug('tensor_name:{}'.format(i))
-		f_tensor.write('{} {}\n'.format(i, graph.tensor_registry[i].shape))
+		f_tensor.write('{} {} {}\n'.format(tid, i, graph.tensor_registry[i].shape))
 		tensor_id[i] = tid
 		tid += 1
 	f_tensor.close()
