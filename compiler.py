@@ -17,19 +17,21 @@ def next_op(op_dict, opname):
 	else:
 		return None
 
+def 
+
 
 def compile_graph(dir_name, graph, acc_obj):
+	logger.debug('Opening binary file in {}'.format(dir_name))
 	f = open(dir_name+"resnet50.bin", "wb")
 
 	instr = []	
-
 
 	prec = acc_obj.prec
 
 	tensor_id = {}
 	tid = 0
 	for i in graph.tensor_registry:
-		print('tensor_name:{}'.format(i))
+		logger.debug('tensor_name:{}'.format(i))
 		tensor_id[i] = tid
 		tid += 1
 
@@ -68,7 +70,7 @@ def compile_graph(dir_name, graph, acc_obj):
 			conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
 
 			_, _, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
-			#instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
 
 		elif isinstance(op, BNorm):
 			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[1].name], tensor_id[op.input_tensors[2].name], tensor_id[op.output_tensors.name])
@@ -86,7 +88,7 @@ def compile_graph(dir_name, graph, acc_obj):
 
 			logger.debug('activation:{}'.format(activation))
 
-			#instr = bnorm2instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, activation)
+			instr = bnorm2instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, activation)
 
 		elif isinstance(op, Add):
 			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[1].name], tensor_id[op.output_tensors.name])
@@ -114,7 +116,7 @@ def compile_graph(dir_name, graph, acc_obj):
 			B = op.output_tensors.fpga_shape[-4]	
 			logger.debug('O:{} OC:{} B:{}'.format(O,OC,B))
 
-			#instr = maxpool2instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, pool_kernel=op.pooling_kernel)		
+			instr = maxpool2instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, pool_kernel=op.pooling_kernel)		
 
 		elif isinstance(op, FC):
 			data = op.input_tensors[0]
@@ -144,7 +146,7 @@ def compile_graph(dir_name, graph, acc_obj):
 			conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
 
 			_, _, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
-			#instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
 
 
 		else:

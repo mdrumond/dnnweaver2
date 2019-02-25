@@ -520,6 +520,103 @@ class MaxPooling(NodeOp):
         dtypes = (self.data.dtype)
         return {Ops.CMP(dtypes): CMP}
 
+class AveragePooling(NodeOp):
+    def __init__(self, data, pooling_kernel, node_name, pad='VALID', stride=None, dtype=None):
+
+        # Input data >3D
+        self.data = data
+
+        # Pooling kernel
+        assert len(pooling_kernel) == len(data.shape)
+        self.pooling_kernel = pooling_kernel
+
+        # Stride
+        if len(stride) == 1:
+            stride = (1, stride, stride, 1)
+        self.stride = stride
+
+        if pad == 'VALID':
+            self.pad = (
+                    (0,0),
+                    (0,0),
+                    (0,0),
+                    (0,0))
+        elif pad == 'SAME':
+            w = self.data.shape[-2]
+            h = self.data.shape[-3]
+            pad_w = (w - 1) * self.stride[-2] - w + self.pooling_kernel[-2]
+            pad_h = (h - 1) * self.stride[-3] - h + self.pooling_kernel[-3]
+            pad_w_l = pad_w // 2
+            pad_w_r = pad_w - pad_w_l
+            pad_h_t = pad_h // 2
+            pad_h_b = pad_h - pad_h_t
+            self.pad = (
+                    (0,0),
+                    (pad_h_t,pad_h_b),
+                    (pad_w_l,pad_w_r),
+                    (0,0))
+        else:
+            _pad = []
+            assert len(pad) == 4 or len(pad) == 2
+            for i in range(len(pad)):
+                if isinstance(pad[i], int):
+                    _pad.append((pad[i],pad[i]))
+                else:
+                    assert len(pad[i]) == 2
+                    _pad.append(tuple(pad[i]))
+            self.pad = _pad
+
+        input_tensors = (data)
+        if dtype is None:
+            dtype = self.data.dtype
+        self.dtype=dtype
+        super(AveragePooling, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _get_output_shape(self):
+        cout = self.data.shape[-1]
+        hout = (self.data.shape[-3] - self.pooling_kernel[-3] + self.pad[-3][0] + self.pad[-3][1]) // self.stride[-3] + 1
+        wout = (self.data.shape[-2] - self.pooling_kernel[-2] + self.pad[-2][0] + self.pad[-2][1]) // self.stride[-2] + 1
+        out_shape = []
+        for i in range(len(self.data.shape)-3):
+            out_shape.append(self.data.shape[i])
+        out_shape.append(hout)
+        out_shape.append(wout)
+        out_shape.append(cout)
+        return tuple(out_shape)
+
+    def _get_output_dtype(self):
+        return self.data.dtype
+
+    def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
+        self.output_loss = self._get_incoming_gradients(y, grad_dtype=grad_dtype)
+
+        if self.input_loss[0] is None:
+            op = MaxPoolBackprop(data=self.data, pooling_kernel=self.pooling_kernel, output_loss=self.output_loss, node_name=self.name)
+            self.input_loss[0] = op.output_tensors
+
+        assert x in self.input_tensors, 'Op: {}, x: {}'.format(self.name, x.name)
+        return self.input_loss[0]
+
+    def get_ops(self):
+        num = 1
+        for i in range(len(self.output_tensors.shape)-3):
+            num *= self.data.shape[i]
+
+        cout = self.output_tensors.shape[-3]
+        hout = self.output_tensors.shape[-2]
+        wout = self.output_tensors.shape[-1]
+
+        hfil = self.pooling_kernel[-2]
+        wfil = self.pooling_kernel[-1]
+
+        CMP = hfil * wfil *\
+                hout * wout * cout *\
+                num
+
+        dtypes = (self.data.dtype)
+        return {Ops.CMP(dtypes): CMP}
+
+
 class MaxPoolBackprop(GradOp):
     def __init__(self, data, output_loss, pooling_kernel, node_name, dtype=None):
         self.data = data
@@ -1250,9 +1347,8 @@ class BNorm(NodeOp):
 
         self.eps = eps
 
-	for i in range(1,len(data.shape)):
-		assert data.shape[i]==gamma.shape[i], 'Shape mismatch for gamma'
-		assert data.shape[i]==beta.shape[i], 'Shape mismatch for beta'
+	assert data.shape[-1]==gamma.shape[0], 'Shape mismatch for gamma'
+	assert data.shape[-1]==beta.shape[0], 'Shape mismatch for beta'
 
         input_tensors = (data, gamma, beta)
 	if dtype==None:
@@ -1353,6 +1449,11 @@ def conv2D_bp(i, w, o, name=None, stride=None, pad='SAME', group=1, dtype=None):
 def maxPool(i, pooling_kernel, stride=(1,2,2,1), pad='VALID', name=None, dtype=None):
     g = get_default_graph()
     op = MaxPooling(i, pooling_kernel, name, stride=stride, pad=pad, dtype=dtype)
+    return typecast(op.output_tensors, dtype)
+
+def averagePool(i, pooling_kernel, stride=(1,2,2,1), pad='VALID', name=None, dtype=None):
+    g = get_default_graph()
+    op = AveragePooling(i, pooling_kernel, name, stride=stride, pad=pad, dtype=dtype)
     return typecast(op.output_tensors, dtype)
 
 def flatten(i, name=None, dtype=None):

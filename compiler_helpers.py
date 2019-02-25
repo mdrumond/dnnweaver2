@@ -634,7 +634,8 @@ def eltwise_instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, vec
 
 	input_output_size = OH*OW*OC*B*oprec
 	
-	mem_chunk = N*M*oprec
+	r=100 #large r means larger data chunks, less instructions.
+	mem_chunk = N*M*oprec*r
 	
 	f= open(dir_name+name+".txt","w")
 
@@ -647,15 +648,15 @@ def eltwise_instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, vec
 
 		for i in range(N):
 			for j in range(M):
-				f.write('ALU {} {}_{} {} #Vector op \n'.format(vector_op, i, j, 1))
+				f.write('ALU {} {}_{} {} #Vector op \n'.format(vector_op, i, j, r))
 				if vector_op == 'Add':
-					instr += encode_instr(OPCodes.ADD, pe_ind(i, j, N), 1)
+					instr += encode_instr(OPCodes.ADD, pe_ind(i, j, N), r)
 				elif vector_op == 'Mult':
-					instr += encode_instr(OPCodes.MULT, pe_ind(i, j, N), 1)
+					instr += encode_instr(OPCodes.MULT, pe_ind(i, j, N), r)
 
 				if activation is not None:
 					f.write('ACT {}_{} {} #Apply activation function \n'.format(i, j, activation))
-					instr += encode_instr(OPCodes.ACT, pe_ind(i, j, N), 1, activation)
+					instr += encode_instr(OPCodes.ACT, pe_ind(i, j, N), r, activation)
 
 		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, out_id)
@@ -675,8 +676,9 @@ def maxpool2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, poo
 
 	total_output_size = OH*OW*OC*B
 
-	mem_chunk_in = N*M*pool_kernel[0]*pool_kernel[1]*oprec
-	mem_chunk_out = N*M*oprec
+	r=10 #large r means larger data chunks, less instructions.
+	mem_chunk_in = N*M*pool_kernel[0]*pool_kernel[1]*oprec*r
+	mem_chunk_out = N*M*oprec*r
 
 	f= open(dir_name+name+".txt","w")
 
@@ -688,11 +690,11 @@ def maxpool2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, poo
 		for i in range(N):
 			for j in range(M):
 				f.write('POOL {}_{} {}_{} #Pooling \n'.format(pool_kernel[0], pool_kernel[1], i, j))
-				instr += encode_instr(OPCodes.POOL, pe_ind(i, j, N), 1, pool_kernel[0])
+				instr += encode_instr(OPCodes.POOL, pe_ind(i, j, N), r, pool_kernel[0])
 
 		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk_out, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk_out, out_id)
-		mem_cnt += N*M
+		mem_cnt += N*M*r
 
 	f.write('EOL #End of layer\n')
 	instr += encode_instr(OPCodes.EOL)
@@ -732,6 +734,7 @@ def maxpool2instr_bp(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, 
 	
 	return instr
 
+#TODO: Agree on with Mario how instructions will work for bnorm
 def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activation=None):
 	z_id, gamma_id, beta_id, out_id = tensor_ids
 
@@ -741,19 +744,18 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 
 	total_input_size = OH*OW*OC*B*oprec
 	
-	mem_chunk_in = N*M*B*oprec
-	mem_chunk_out = N*M*B*oprec
+	mem_chunk = OH*OW*B*oprec
 
 	f= open(dir_name+name+".txt","w")
 
 	mem_cnt = 0
 	while mem_cnt < total_input_size:
-		f.write('DRAM_RD {} {} #Read z\n'.format(mem_chunk_in, z_id))
-		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk_in, z_id)
-		f.write('DRAM_RD {} {} #Read gamma\n'.format(mem_chunk_in/B, gamma_id))
-		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk_in/B, gamma_id)
-		f.write('DRAM_RD {} {} #Read beta\n'.format(mem_chunk_in/B, beta_id))
-		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk_in/B, beta_id)
+		f.write('DRAM_RD {} {} #Read z\n'.format(mem_chunk, z_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, z_id)
+		f.write('DRAM_RD {} {} #Read gamma\n'.format(oprec, gamma_id))
+		instr += encode_instr(OPCodes.DRAM_RD, oprec, gamma_id)
+		f.write('DRAM_RD {} {} #Read beta\n'.format(oprec, beta_id))
+		instr += encode_instr(OPCodes.DRAM_RD, oprec, beta_id)
 
 		for i in range(N):
 			for j in range(M):
@@ -763,15 +765,16 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 					f.write('ACT {}_{} {} #Apply activation function \n'.format(i, j, activation))
 					instr += encode_instr(OPCodes.ACT, pe_ind(i, j, N), 1, activation)
 
-		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk_out, out_id))
-		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk_out, out_id)
-		mem_cnt += mem_chunk_in
+		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk, out_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, out_id)
+		mem_cnt += mem_chunk
 
 	f.write('EOL #End of layer\n')
 	instr += encode_instr(OPCodes.EOL)
 
 	return instr
 
+#TODO: Update this for tensor indexes
 # According to http://cthorey.github.io./backpropagation/
 def bnorm2instr_bp(dir_name,name, OH, OW, OC, B, acc_obj):
 	N = acc_obj.N
@@ -780,7 +783,7 @@ def bnorm2instr_bp(dir_name,name, OH, OW, OC, B, acc_obj):
 
 	total_output_size = OH*OW*OC*B*oprec
 	
-	mem_chunk = N*M*B*oprec
+	mem_chunk = OH*OW*B*oprec
 
 	f= open(dir_name+name+".txt","w")
 
