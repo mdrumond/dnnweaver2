@@ -10,7 +10,7 @@ from dnnweaver2 import get_tensor
 from dnnweaver2.scalar.dtypes import FQDtype, FixedPoint
 from dnnweaver2.tensorOps.cnn import conv2D,conv2D_bp, maxPool, Convolution, flatten, matmul
 
-from custom_isa import OPCodes, ACTType
+from custom_isa import OPCodes, ACTType, MACType
 
 tile_deps = {}
 tile_deps['B/b']   = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False}
@@ -82,41 +82,33 @@ def decode_instr(f):
 			print('MAC {} {}'.format(op1, op2))
 		elif opcode==OPCodes.MULT:
 			op1 = read_op(f,4)
-			op2 = read_op(f,4)
-			print('MULT {} {}'.format(op1, op2))
+			print('MULT {}'.format(op1))
 		elif opcode==OPCodes.ADD:
 			op1 = read_op(f,4)
-			op2 = read_op(f,4)
-			print('ADD {} {}'.format(op1, op2))
+			print('ADD {}'.format(op1))
 		elif opcode==OPCodes.ACT:
 			op1 = read_op(f,4)
 			op2 = read_op(f,4)
-			op3 = read_op(f,1)
-			print('ACT {} {} {}'.format(op1, op2, op3))
+			print('ACT {} {}'.format(op1, op2))
 		elif opcode==OPCodes.POOL:
 			op1 = read_op(f,4)
 			op2 = read_op(f,4)
-			op3 = read_op(f,1)
-			print('POOL {} {} {}'.format(op1, op2, op3))
+			print('POOL {} {}'.format(op1, op2))
 		elif opcode==OPCodes.POOL_BP:
 			op1 = read_op(f,4)
 			op2 = read_op(f,4)
-			op3 = read_op(f,1)
-			print('POOL_BP {} {} {}'.format(op1, op2, op3))
+			print('POOL_BP {} {}'.format(op1, op2))
 		elif opcode==OPCodes.BNORM:
 			op1 = read_op(f,4)
 			op2 = read_op(f,4)
-			op3 = read_op(f,1)
-			print('BNORM {} {} {}'.format(op1, op2, op3))
+			print('BNORM {} {}'.format(op1, op2))
 		elif opcode==OPCodes.BNORM_BP:
 			op1 = read_op(f,4)
 			op2 = read_op(f,4)
-			op3 = read_op(f,1)
-			print('BNORM_BP {} {} {}'.format(op1, op2, op3))
+			print('BNORM_BP {} {}'.format(op1, op2))
 		elif opcode==OPCodes.NOP:
 			op1 = read_op(f,4)
-			op2 = read_op(f,4)
-			print('NOP {} {} {}'.format(op1, op2))
+			print('NOP {}'.format(op1))
 		elif opcode==OPCodes.EOL:
 			print('EOL')
 		else:
@@ -125,7 +117,7 @@ def decode_instr(f):
 		rbin = f.read(1)
 
 
-def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, activation=None, transpose_weight=False):
+def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False):
 	IH = OH*S
 	IW = OW*S
 
@@ -286,54 +278,25 @@ def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B
 							cycle += int(math.ceil(float(bias_tile_size) / DRAM_BW))
 							bbuf_fetch = False
 						
-						first_pe_load_x = math.ceil(float(_ic)/num_rows)
-						first_pe_load_y = math.ceil(float(_oc)/num_cols)
-						last_pe_load_x = _ic-(num_rows-1)*first_pe_load_x
-						last_pe_load_y = _oc-(num_cols-1)*first_pe_load_y
 
-						for pe_x in range(num_rows-1):
-							for pe_y in range(num_cols-1):
-								compute_cycles_per_pe = first_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b 
-								f.write('ALU {}_{} {} #Compute inner loop \n'.format(pe_x, pe_y, int(compute_cycles_per_pe)))
-								instr += encode_instr(OPCodes.MAC, pe_ind(pe_x, pe_y, num_rows), int(compute_cycles_per_pe))
 
-								if retire_output==True:
-									if activation is not None:
-										f.write('ACT {}_{} {} #Apply activation function \n'.format(pe_x, pe_y, activation))
-										instr += encode_instr(OPCodes.ACT, pe_ind(pe_x, pe_y, num_rows), activation)
 
-							compute_cycles_per_pe = first_pe_load_x * last_pe_load_y * kw * kh * _oh * _ow * _b
+						
+						compute_cycles_per_pe = math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b 
+						f.write('ALU {} #Compute inner loop \n'.format(int(compute_cycles_per_pe)))
+						instr += encode_instr(OPCodes.MAC, int(compute_cycles_per_pe), mac_type)
 
-							f.write('ALU {}_{} {} #Compute inner loop \n'.format(pe_x, num_cols-1, int(compute_cycles_per_pe)))
-							instr += encode_instr(OPCodes.MAC, pe_ind(pe_x, num_cols-1, num_rows), int(compute_cycles_per_pe))
-
-							if retire_output==True and compute_cycles_per_pe>0:
-								if activation is not None:
-									f.write('ACT {}_{} {} #Apply activation function \n'.format(pe_x, num_cols-1, activation))
-									instr += encode_instr(OPCodes.ACT, pe_ind(pe_x, num_cols-1, num_rows), activation)
-
-						for pe_y in range(num_cols-1):
-							compute_cycles_per_pe = last_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b 
-
-							f.write('ALU {}_{} {} #Compute inner loop \n'.format(num_rows-1, pe_y, int(compute_cycles_per_pe)))
-							instr += encode_instr(OPCodes.MAC, pe_ind(num_rows-1, pe_y, num_rows), int(compute_cycles_per_pe))
-							if retire_output==True and compute_cycles_per_pe>0:
-								if activation is not None:
-									f.write('ACT {}_{} {} #Apply activation function \n'.format(num_rows-1, pe_y, activation))
-									instr += encode_instr(OPCodes.ACT, pe_ind(num_rows-1, pe_y, num_rows), activation)
-
-						compute_cycles_per_pe = last_pe_load_x * last_pe_load_y * kw * kh * _oh * _ow * _b 
-
-						f.write('ALU {}_{} {} #Compute inner loop \n'.format(num_rows-1, num_cols-1, int(compute_cycles_per_pe)))
-						instr += encode_instr(OPCodes.MAC, pe_ind(num_rows-1, num_cols-1, num_rows), int(compute_cycles_per_pe))
-						if retire_output==True and compute_cycles_per_pe>0:
-							if activation is not None:
-								f.write('ACT {}_{} {} #Apply activation function \n'.format(num_rows-1, num_cols-1, activation))
-								instr += encode_instr(OPCodes.ACT, pe_ind(num_rows-1, num_cols-1, num_rows), activation)
-
-						cycle += first_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b 
 						if retire_output==True:
-							cycle += 2 * first_pe_load_y * _oh * _ow * _b 
+							if activation is not None:
+								f.write('ACT {}_{} {} #Apply activation function \n'.format(activation))
+								instr += encode_instr(OPCodes.ACT, math.ceil(float(_oc)/num_cols), activation)
+
+
+
+
+						cycle += math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b 
+						if retire_output==True:
+							cycle += 2 * math.ceil(float(_oc)/num_cols) * _oh * _ow * _b 
 							retire_output = False
 
 						if tile_deps[order[0]]['obuf'] == True:
@@ -402,11 +365,11 @@ def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B
 
 # https://www.jefkine.com/general/2016/09/05/backpropagation-in-convolutional-neural-networks/
 # http://neuralnetworksanddeeplearning.com/chap2.html
-def conv2instr_bp(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, activation=None):
+def conv2instr_bp(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None):
 	IH = OH*S
 	IW = OW*S
 
-	data_id, weight_id, bias_id, out_id = tensor_ids
+	out_id, data_id, _, weight_id = tensor_ids
 
 	num_rows = acc_obj.N
 	num_cols = acc_obj.M
@@ -547,31 +510,12 @@ def conv2instr_bp(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC
 							cycle += int(math.ceil(float(output_tile_size) / DRAM_BW))
 							obuf_fetch = False
 
-						first_pe_load_x = math.ceil(float(_ic)/num_rows)
-						first_pe_load_y = math.ceil(float(_oc)/num_cols)
-						last_pe_load_x = _ic-(num_rows-1)*first_pe_load_x
-						last_pe_load_y = _oc-(num_cols-1)*first_pe_load_y
 
-						for pe_x in range(num_rows-1):
-							for pe_y in range(num_cols-1):
-								compute_cycles_per_pe = first_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b
-								f.write('ALU {}_{} {} #Compute inner loop \n'.format(pe_x, pe_y, int(compute_cycles_per_pe)))
-								instr += encode_instr(OPCodes.MAC, pe_ind(pe_x, pe_y, num_rows), int(compute_cycles_per_pe))
+						compute_cycles_per_pe = math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b
+						f.write('ALU {} #Compute inner loop \n'.format(int(compute_cycles_per_pe)))
+						instr += encode_instr(OPCodes.MAC, int(compute_cycles_per_pe), mac_type)
 
-							compute_cycles_per_pe = first_pe_load_x * last_pe_load_y * kw * kh * _oh * _ow * _b
-							f.write('ALU {}_{} {} #Compute inner loop \n'.format(pe_x, num_cols-1, int(compute_cycles_per_pe)))
-							instr += encode_instr(OPCodes.MAC, pe_ind(pe_x, num_cols-1, num_rows), int(compute_cycles_per_pe))
-
-						for pe_y in range(num_cols-1):
-							compute_cycles_per_pe = last_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b
-							f.write('ALU {}_{} {} #Compute inner loop \n'.format(num_rows-1, pe_y, int(compute_cycles_per_pe)))
-							instr += encode_instr(OPCodes.MAC, pe_ind(num_rows-1, pe_y, num_rows), int(compute_cycles_per_pe))
-
-						compute_cycles_per_pe = last_pe_load_x * last_pe_load_y * kw * kh * _oh * _ow * _b
-						f.write('ALU {}_{} {} #Compute inner loop \n'.format(num_rows-1, num_cols-1, int(compute_cycles_per_pe)))
-						instr += encode_instr(OPCodes.MAC, pe_ind(num_rows-1, pe_y, num_cols-1), int(compute_cycles_per_pe))
-
-						cycle += first_pe_load_x * first_pe_load_y * kw * kh * _oh * _ow * _b
+						cycle += math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b
 						if retire_output==True:
 							retire_output = False
 
@@ -646,17 +590,17 @@ def eltwise_instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, vec
 		f.write('DRAM_RD {} {} #Read vec2\n'.format(mem_chunk, data2_id))
 		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, data2_id)
 
-		for i in range(N):
-			for j in range(M):
-				f.write('ALU {} {}_{} {} #Vector op \n'.format(vector_op, i, j, r))
-				if vector_op == 'Add':
-					instr += encode_instr(OPCodes.ADD, pe_ind(i, j, N), r)
-				elif vector_op == 'Mult':
-					instr += encode_instr(OPCodes.MULT, pe_ind(i, j, N), r)
 
-				if activation is not None:
-					f.write('ACT {}_{} {} #Apply activation function \n'.format(i, j, activation))
-					instr += encode_instr(OPCodes.ACT, pe_ind(i, j, N), r, activation)
+		f.write('ALU {} {} #Vector op \n'.format(vector_op, r))
+		if vector_op == 'Add':
+			instr += encode_instr(OPCodes.ADD, r)
+		elif vector_op == 'Mult':
+			instr += encode_instr(OPCodes.MULT, r)
+
+		if activation is not None:
+			f.write('ACT {} #Apply activation function \n'.format(activation))
+			instr += encode_instr(OPCodes.ACT, r, activation)
+
 
 		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, out_id)
@@ -687,10 +631,8 @@ def maxpool2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, poo
 		f.write('DRAM_RD {} {} #Read Input\n'.format(mem_chunk_in, inp_id))
 		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk_in, inp_id)
 
-		for i in range(N):
-			for j in range(M):
-				f.write('POOL {}_{} {}_{} #Pooling \n'.format(pool_kernel[0], pool_kernel[1], i, j))
-				instr += encode_instr(OPCodes.POOL, pe_ind(i, j, N), r, pool_kernel[0])
+		f.write('POOL {}_{} #Pooling \n'.format(pool_kernel[0], pool_kernel[1]))
+		instr += encode_instr(OPCodes.POOL, r, pool_kernel[0])
 
 		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk_out, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk_out, out_id)
@@ -720,10 +662,8 @@ def maxpool2instr_bp(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, 
 		f.write('DRAM_RD {} {} #Read Input\n'.format(mem_chunk_in, out_id))
 		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk_in, out_id)
 
-		for i in range(N):
-			for j in range(M):
-				f.write('POOL_BP {}_{} {} {} #BP pooling \n'.format(i, j, pool_kernel[0], 1))
-				instr += encode_instr(OPCodes.POOL_BP, pe_ind(i, j, N), 1, pool_kernel[0])
+		f.write('POOL_BP {} {} #BP pooling \n'.format(pool_kernel[0], pool_kernel[1]))
+		instr += encode_instr(OPCodes.POOL_BP, 1, pool_kernel[0])
 
 		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk_out, inp_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk_out, inp_id)
@@ -757,13 +697,13 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 		f.write('DRAM_RD {} {} #Read beta\n'.format(oprec, beta_id))
 		instr += encode_instr(OPCodes.DRAM_RD, oprec, beta_id)
 
-		for i in range(N):
-			for j in range(M):
-				f.write('BNORM {}_{} {} {} #Batch norm \n'.format(i, j, B, 1))
-				instr += encode_instr(OPCodes.BNORM, pe_ind(i, j, N), 1, B)
-				if activation is not None:
-					f.write('ACT {}_{} {} #Apply activation function \n'.format(i, j, activation))
-					instr += encode_instr(OPCodes.ACT, pe_ind(i, j, N), 1, activation)
+
+		f.write('BNORM {} #Batch norm \n'.format(B))
+		instr += encode_instr(OPCodes.BNORM, 1, B)
+		if activation is not None:
+			f.write('ACT {} #Apply activation function \n'.format(activation))
+			instr += encode_instr(OPCodes.ACT, 1, activation)
+
 
 		f.write('DRAM_WR {} {} #Write output\n'.format(mem_chunk, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, out_id)
@@ -776,7 +716,7 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 
 #TODO: Update this for tensor indexes
 # According to http://cthorey.github.io./backpropagation/
-def bnorm2instr_bp(dir_name,name, OH, OW, OC, B, acc_obj):
+def bnorm2instr_bp(instr,dir_name,name, tensor_ids,OH, OW, OC, B, acc_obj):
 	N = acc_obj.N
 	M = acc_obj.M
 	oprec = acc_obj.prec[3]
@@ -805,3 +745,4 @@ def bnorm2instr_bp(dir_name,name, OH, OW, OC, B, acc_obj):
 		mem_cnt += mem_chunk
 
 	f.write('EOL #End of layer\n')
+	return instr

@@ -16,3 +16,7 @@ class OPCodes:
 class ACTType:
     RELU     = 0
     SOFTMAX  = 1
+
+class MACType:
+    CONV     = 0
+    FC	     = 1

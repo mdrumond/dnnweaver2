@@ -55,12 +55,14 @@ with graph.as_default():
 		             name='biases')
 		conv1 = conv2D(i, weights, biases, stride=(1,2,2,1), pad='SAME')
 
-		gamma = get_tensor(shape=(1,112,112,64), name='gamma')
-		beta = get_tensor(shape=(1,112,112,64), name='beta')
+		gamma = get_tensor(shape=(64), name='gamma')
+		beta = get_tensor(shape=(64), name='beta')
 		conv1 = b_norm(conv1,gamma,beta)
 
 		conv1 = reLU(conv1)
+
 		conv1_pool = maxPool(conv1, pooling_kernel=(1,3,3,1), stride=(1,2,2,1), pad='VALID')
+
 		conv1_pool = fork(conv1_pool)
 
 #################### conv2a #######################	
@@ -71,8 +73,8 @@ with graph.as_default():
 		             name='biases')
 		conv2a_1 = conv2D(conv1_pool, weights, biases, stride=(1,1,1,1), pad='SAME')  
 
-		gamma = get_tensor(shape=(1,55,55,256), name='gamma')
-		beta = get_tensor(shape=(1,55,55,256), name='beta')
+		gamma = get_tensor(shape=(256), name='gamma')
+		beta = get_tensor(shape=(256), name='beta')
 		conv2a_1 = b_norm(conv2a_1,gamma,beta)
 
 	with graph.name_scope('conv2a_2a'):
@@ -82,8 +84,8 @@ with graph.as_default():
 		             name='biases')
 		conv2a_2a = conv2D(conv1_pool, weights, biases, stride=(1,1,1,1), pad='SAME')    
 
-		gamma = get_tensor(shape=(1,55,55,64), name='gamma')
-		beta = get_tensor(shape=(1,55,55,64), name='beta')
+		gamma = get_tensor(shape=(64), name='gamma')
+		beta = get_tensor(shape=(64), name='beta')
 		conv2a_2a = b_norm(conv2a_2a,gamma,beta)
 		conv2a_2a = reLU(conv2a_2a)
 
@@ -93,8 +95,8 @@ with graph.as_default():
 		biases = get_tensor(shape=(64),
 		             name='biases')
 		conv2a_2b = conv2D(conv2a_2a, weights, biases, stride=(1,1,1,1), pad='SAME')
-		gamma = get_tensor(shape=(1,55,55,64), name='gamma')
-		beta = get_tensor(shape=(1,55,55,64), name='beta')
+		gamma = get_tensor(shape=(64), name='gamma')
+		beta = get_tensor(shape=(64), name='beta')
 		conv2a_2b = b_norm(conv2a_2b,gamma,beta)
 		conv2a_2b = reLU(conv2a_2b)
 
@@ -104,8 +106,8 @@ with graph.as_default():
 		biases = get_tensor(shape=(256),
 		             name='biases')
 		conv2a_2c = conv2D(conv2a_2b, weights, biases, stride=(1,1,1,1), pad='SAME')
-		gamma = get_tensor(shape=(1,55,55,256), name='gamma')
-		beta = get_tensor(shape=(1,55,55,256), name='beta')
+		gamma = get_tensor(shape=(256), name='gamma')
+		beta = get_tensor(shape=(256), name='beta')
 		conv2a_2c = b_norm(conv2a_2c,gamma,beta)
 		
 	with graph.name_scope('res2a'):
@@ -119,6 +121,7 @@ with graph.as_default():
 		biases = get_tensor(shape=(1000),
 				     name='biases')
 		fc = fc(res2a_pool, weights, biases, stride=(1,1,1,1), pad='SAME')
+
 
 compile_graph('resnet50/', graph, acc_obj)
 #compile_graph_bp('resnet50_bp/', graph, acc_obj)
