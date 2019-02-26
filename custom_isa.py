@@ -4,6 +4,7 @@ class OPCodes:
     DRAM_RD_TP  = 2
     MAC       	= 3
     MULT       	= 4
+    MULT_DER  	= 13
     ADD   	= 5
     ACT   	= 6
     POOL        = 7

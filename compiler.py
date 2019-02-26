@@ -17,25 +17,67 @@ def next_op(op_dict, opname):
 	else:
 		return None
 
+def tensor_nodes(tensor_name, op_dict):
+	src = []
+	dst = []
+	for opname in op_dict:
+		op = op_dict[opname]
+		if isinstance(op.output_tensors, list):
+			for t in op.output_tensors:
+				if tensor_name is t.name:
+					src.append(op)			
+		else:
+			if tensor_name is op.output_tensors.name:
+				src.append(op)
+		for t in op.input_tensors:
+			if tensor_name is t.name:
+				dst.append(op)
+	return (src,dst)
+
+def get_src_error(tensor, op_dict):
+	(src,dst) = tensor_nodes(tensor.name, op_dict)
+	logger.debug('Tensor name: {} src:{} dst:{}'.format(tensor.name, src, dst))
+
+	if len(src)==0:
+		return None
+
+	if isinstance(src[0].output_tensors, list):
+		no_src_out_tensors = len(src[0].output_errors)
+		for t in range(no_src_out_tensors):
+			if src[0].output_tensors[t].name is tensor.name:
+				out_ind = t
+		return src[0].output_errors[out_ind]
+	else:
+		return src[0].output_errors
+
+
+
 def compile_graph(dir_name, graph, acc_obj):
 	logger.debug('Opening binary file in {}'.format(dir_name))
+	
 	f = open(dir_name+"resnet50.bin", "wb")
+	f.close()
 
 	instr = []	
 
 	prec = acc_obj.prec
 
+	op_dict = graph.op_registry
+
 	f_tensor = open(dir_name+"tensors.txt", "w")
 	tensor_id = {}
 	tid = 0
 	for i in graph.tensor_registry:
-		logger.debug('tensor_name:{}'.format(i))
+		(src,dst) = tensor_nodes(i, op_dict)
+		
+		logger.debug('tensor_name:{} \t\t src:{} -> dst:{}'.format(i,src,dst))
+
 		f_tensor.write('{} {} {}\n'.format(tid, i, graph.tensor_registry[i].shape))
 		tensor_id[i] = tid
 		tid += 1
 	f_tensor.close()
 
-	op_dict = graph.op_registry
+	
 
 	for opname in op_dict:
 		op = op_dict[opname]
@@ -51,10 +93,10 @@ def compile_graph(dir_name, graph, acc_obj):
 			tensor_ids = (tensor_id[data.name], tensor_id[weight.name], tensor_id[bias.name], tensor_id[out.name])
 			logger.debug('tensor_ids:{}'.format(tensor_ids))
 
-			logger.debug('Input tensor: {}'.format(data.shape))
-			logger.debug('Weight tensor: {}'.format(weight.shape))
-			logger.debug('Bias tensor: {}'.format(bias.shape))
-			logger.debug('Output tensor: {}'.format(out.shape))
+			logger.debug('Input tensor: {} {}'.format(data.name, data.shape))
+			logger.debug('Weight tensor: {} {}'.format(weight.name, weight.shape))
+			logger.debug('Bias tensor: {} {}'.format(bias.name, bias.shape))
+			logger.debug('Output tensor: {} {}'.format(out.name, out.shape))
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
@@ -107,6 +149,10 @@ def compile_graph(dir_name, graph, acc_obj):
 
 			instr = eltwise_instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, vector_op='Add', activation=activation)
 
+		elif isinstance(op, Fork):
+			tensor_id[op.output_tensors[0].name] = tensor_id[op.input_tensors[0].name]
+			tensor_id[op.output_tensors[1].name] = tensor_id[op.input_tensors[0].name]
+
 		elif isinstance(op, MaxPooling):
 			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.output_tensors.name])
 			logger.debug('tensor_ids:{}'.format(tensor_ids))
@@ -149,32 +195,40 @@ def compile_graph(dir_name, graph, acc_obj):
 			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
 
 		else:
-			print('Unoptimized layer:{} Connecting input to output:'.format(opname))
+			print('Ineffective layer:{} Connecting input to output:'.format(opname))
 			tensor_id[op.output_tensors.name] = tensor_id[op.input_tensors[0].name]
 			print('tensor_id:{}'.format(tensor_id[op.input_tensors[0].name]))
 			print('tensor_id:{}'.format(tensor_id[op.output_tensors.name]))
 
-
-	instr_bin = bytearray(instr)
-	f.write(instr_bin)
-	f.close()
+		f = open(dir_name+"resnet50.bin", "ab")
+		instr_bin = bytearray(instr)
+		f.write(instr_bin)
+		f.close()
+		instr = []
 
 
 def compile_graph_bp(dir_name, graph, acc_obj):
 	f = open(dir_name+"resnet50.bin", "wb")
+	f.close()
 
 	instr = []	
 
 	prec = acc_obj.prec
 
+	op_dict = graph.op_registry
+
+	f_tensor = open(dir_name+"tensors.txt", "w")
 	tensor_id = {}
 	tid = 0
 	for i in graph.tensor_registry:
-		logger.debug('tensor_name:{}'.format(i))
+		(src,dst) = tensor_nodes(i, op_dict)
+		
+		logger.debug('tensor_name:{} \t\t src:{} -> dst:{}'.format(i,src,dst))
+
+		f_tensor.write('{} {} {}\n'.format(tid, i, graph.tensor_registry[i].shape))
 		tensor_id[i] = tid
 		tid += 1
-
-	op_dict = graph.op_registry
+	f_tensor.close()
 
 	for opname in reversed(op_dict):
 		op = op_dict[opname]
@@ -210,51 +264,63 @@ def compile_graph_bp(dir_name, graph, acc_obj):
 			#error -> grads
 			tensor_ids = (tensor_id[out_error.name], tensor_id[data.name], None, tensor_id[w_grad.name])
 			_, _, stats = optimize_for_order_bp(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
-			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, activation=None)
+			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=True)
 
 			#error -> prev. error
-			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[out.name])
+			prev_error = get_src_error(data, op_dict)
+			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[prev_error.name])
 			_, _, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
-			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
+			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
 
-		if isinstance(op, MaxPooling):
+		elif isinstance(op, MaxPooling):
 			O = op.output_tensors.fpga_shape[-2]
 			OC = op.output_tensors.fpga_shape[-1]
 			B = op.output_tensors.fpga_shape[-4]	
 			logger.debug('O:{} OC:{} B:{}'.format(O,OC,B))
 
-			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.output_tensors.name])
+			input_tensor = op.input_tensors[0]
+			prev_error = get_src_error(input_tensor, op_dict)
+			tensor_ids = (tensor_id[prev_error.name], tensor_id[op.output_errors.name])
 
 			instr = maxpool2instr_bp(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, pool_kernel=op.pooling_kernel)	
 
-		if isinstance(op, ReLU):
+		elif isinstance(op, ReLU):
 			O = op.output_tensors.fpga_shape[-2]
 			OC = op.output_tensors.fpga_shape[-1]
 			B = op.output_tensors.fpga_shape[-4]	
 
-			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[0].name], tensor_id[op.output_tensors.name])
+			input_tensor = op.input_tensors[0]
+			prev_error = get_src_error(input_tensor, op_dict)
+			tensor_ids = (tensor_id[op.output_errors.name], tensor_id[input_tensor.name], tensor_id[prev_error.name])
 
 			#multiply error with act. derivation
-			instr = eltwise_instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, vector_op='Mult', activation=ACTType.RELU)
+			instr = eltwise_instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, vector_op='Mult_der', activation=None)
 
-		if isinstance(op, BNorm):
+		elif isinstance(op, BNorm):
 			O = op.output_tensors.fpga_shape[-2]
 			OC = op.output_tensors.fpga_shape[-1]
 			B = op.output_tensors.fpga_shape[-4]
 
-			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[1].name], tensor_id[op.input_tensors[2].name], tensor_id[op.output_tensors.name])
+			#h_id, dh_id, gamma_id, dgamma_id, beta_id, dbeta_id, dy_id = tensor_ids
+			input_tensor = op.input_tensors[0]
+			gamma_tensor = op.input_tensors[1]
+			beta_tensor = op.input_tensors[2]
+			dgamma_tensor = op.gamma_grads
+			dbeta_tensor = op.beta_grads			
+
+			prev_error = get_src_error(input_tensor, op_dict)
+
+			tensor_ids = (tensor_id[input_tensor.name], tensor_id[prev_error.name], tensor_id[gamma_tensor.name], tensor_id[dgamma_tensor.name], tensor_id[beta_tensor.name], tensor_id[dbeta_tensor.name], tensor_id[op.output_errors.name])
 
 			instr = bnorm2instr_bp(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj)
 
-		if isinstance(op, Convolution):
+		elif isinstance(op, Convolution):
 			data = op.input_tensors[0]
 			weight = op.input_tensors[1]
 			bias = op.input_tensors[2]
 			out = op.output_tensors
 			out_error = op.output_errors
 			w_grad = op.weight_grads
-
-			tensor_ids = (tensor_id[data.name], tensor_id[weight.name], tensor_id[bias.name], tensor_id[out.name])
 
 			logger.debug('Input tensor: {}'.format(data.shape))
 			logger.debug('Weight tensor: {}'.format(weight.shape))
@@ -277,21 +343,54 @@ def compile_graph_bp(dir_name, graph, acc_obj):
 			conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
 
 			#error -> grads
+			tensor_ids = (tensor_id[out_error.name], tensor_id[data.name], None, tensor_id[w_grad.name])
 			_, _, stats = optimize_for_order_bp(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
 			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, activation=None)
 
 			#error -> prev. error
+			prev_error = get_src_error(data, op_dict)
+			if prev_error==None:
+				break
+			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[prev_error.name])
 			_, _, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
 			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
 
-		if isinstance(op, Fork):
-			O = op.output_tensors.fpga_shape[-2]
-			OC = op.output_tensors.fpga_shape[-1]
-			B = op.output_tensors.fpga_shape[-4]
+		elif isinstance(op, Add):
+			prev_error1 = get_src_error(op.input_tensors[0], op_dict)
+			prev_error2 = get_src_error(op.input_tensors[1], op_dict)
 
-			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[1].name], tensor_id[op.output_tensors.name])
-			print('Writing to file: {}'.format(filename))
+			tensor_id[prev_error1.name] = tensor_id[op.output_errors.name]
+			tensor_id[prev_error2.name] = tensor_id[op.output_errors.name]
+
+		elif isinstance(op, Fork):
+			O = op.output_tensors[0].fpga_shape[-2]
+			OC = op.output_tensors[0].fpga_shape[-1]
+			B = op.output_tensors[0].fpga_shape[-4]
+
+			prev_error = get_src_error(op.input_tensors[0], op_dict)
+			tensor_ids = (tensor_id[op.output_errors[0].name], tensor_id[op.output_errors[1].name], tensor_id[prev_error.name])
+
+
 			#Add errors due to residual branch
 			instr = eltwise_instr(instr, dir_name, filename, tensor_ids, O, O, OC, B, acc_obj, vector_op='Add', activation=None)
+
+		else:
+			print('Ineffective layer:{} Connecting input to output:'.format(opname))
+			prev_error = get_src_error(op.input_tensors[0], op_dict)
+			tensor_id[prev_error.name] = tensor_id[op.output_errors.name]
+
+
+		f = open(dir_name+"resnet50.bin", "ab")
+		instr_bin = bytearray(instr)
+		f.write(instr_bin)
+		f.close()
+		instr = []
+
+
+
+
+
+
+
 
 

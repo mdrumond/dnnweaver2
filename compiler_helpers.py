@@ -83,6 +83,9 @@ def decode_instr(f):
 		elif opcode==OPCodes.MULT:
 			op1 = read_op(f,4)
 			print('MULT {}'.format(op1))
+		elif opcode==OPCodes.MULT_DER:
+			op1 = read_op(f,4)
+			print('MULT_DER {}'.format(op1))
 		elif opcode==OPCodes.ADD:
 			op1 = read_op(f,4)
 			print('ADD {}'.format(op1))
@@ -271,11 +274,12 @@ def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B
 							wbuf_fetch = False
 
 						if bbuf_fetch == True:
-							dram_read += bias_tile_size
-							f.write('DRAM_RD {} {} #Read bias tile\n'.format(bias_tile_size, bias_id))
-							instr += encode_instr(OPCodes.DRAM_RD,bias_tile_size,bias_id)
+							if bias_id is not None:
+								dram_read += bias_tile_size
+								f.write('DRAM_RD {} {} #Read bias tile\n'.format(bias_tile_size, bias_id))
+								instr += encode_instr(OPCodes.DRAM_RD,bias_tile_size,bias_id)
 
-							cycle += int(math.ceil(float(bias_tile_size) / DRAM_BW))
+								cycle += int(math.ceil(float(bias_tile_size) / DRAM_BW))
 							bbuf_fetch = False
 						
 
@@ -365,7 +369,7 @@ def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B
 
 # https://www.jefkine.com/general/2016/09/05/backpropagation-in-convolutional-neural-networks/
 # http://neuralnetworksanddeeplearning.com/chap2.html
-def conv2instr_bp(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None):
+def conv2instr_bp(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False):
 	IH = OH*S
 	IW = OW*S
 
@@ -596,11 +600,14 @@ def eltwise_instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, vec
 			instr += encode_instr(OPCodes.ADD, r)
 		elif vector_op == 'Mult':
 			instr += encode_instr(OPCodes.MULT, r)
+		elif vector_op == 'Mult_der':
+			instr += encode_instr(OPCodes.MULT_DER, r)
+		else:
+			assert False, 'ALU op is not defined'
 
 		if activation is not None:
 			f.write('ACT {} #Apply activation function \n'.format(activation))
 			instr += encode_instr(OPCodes.ACT, r, activation)
-
 
 		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, out_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, out_id)
@@ -682,14 +689,14 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 	M = acc_obj.M
 	oprec = acc_obj.prec[3]
 
-	total_input_size = OH*OW*OC*B*oprec
+	total_output_size = OH*OW*OC*B*oprec
 	
 	mem_chunk = OH*OW*B*oprec
 
 	f= open(dir_name+name+".txt","w")
 
 	mem_cnt = 0
-	while mem_cnt < total_input_size:
+	while mem_cnt < total_output_size:
 		f.write('DRAM_RD {} {} #Read z\n'.format(mem_chunk, z_id))
 		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, z_id)
 		f.write('DRAM_RD {} {} #Read gamma\n'.format(oprec, gamma_id))
@@ -716,7 +723,9 @@ def bnorm2instr(instr, dir_name, name, tensor_ids, OH, OW, OC, B, acc_obj, activ
 
 #TODO: Update this for tensor indexes
 # According to http://cthorey.github.io./backpropagation/
-def bnorm2instr_bp(instr,dir_name,name, tensor_ids,OH, OW, OC, B, acc_obj):
+def bnorm2instr_bp(instr,dir_name,name, tensor_ids, OH, OW, OC, B, acc_obj):
+	h_id, dh_id, gamma_id, dgamma_id, beta_id, dbeta_id, dy_id = tensor_ids
+
 	N = acc_obj.N
 	M = acc_obj.M
 	oprec = acc_obj.prec[3]
@@ -730,19 +739,26 @@ def bnorm2instr_bp(instr,dir_name,name, tensor_ids,OH, OW, OC, B, acc_obj):
 	mem_cnt = 0
 	while mem_cnt < total_output_size:
 		f.write('DRAM_RD {} #Read h\n'.format(mem_chunk))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, h_id)
 		f.write('DRAM_RD {} #Read dy\n'.format(mem_chunk))
-		f.write('DRAM_RD {} #Read gamma\n'.format(mem_chunk/B))
-		f.write('DRAM_RD {} #Read beta\n'.format(mem_chunk/B))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, dy_id)
+		f.write('DRAM_RD {} #Read gamma\n'.format(oprec))
+		instr += encode_instr(OPCodes.DRAM_RD, oprec, gamma_id)
+		f.write('DRAM_RD {} #Read beta\n'.format(oprec))
+		instr += encode_instr(OPCodes.DRAM_RD, oprec, beta_id)
 
-		for i in range(N):
-			for j in range(M):
-				f.write('BNORM_BP {}_{} {} {} #Calc. dh, dgamma, dbeta \n'.format(i, j, B, 1))
+		f.write('BNORM_BP {} {} #Calc. dh, dgamma, dbeta \n'.format(B, 1))
+		instr += encode_instr(OPCodes.BNORM_BP, 1, B)
 
 		f.write('DRAM_WR {} #Write dh\n'.format(mem_chunk))
-		f.write('DRAM_WR {} #Write dgamma\n'.format(mem_chunk/B))
-		f.write('DRAM_WR {} #Write dbeta\n'.format(mem_chunk/B))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, dh_id)
+		f.write('DRAM_WR {} #Write dgamma\n'.format(oprec))
+		instr += encode_instr(OPCodes.DRAM_WR, oprec, dgamma_id)
+		f.write('DRAM_WR {} #Write dbeta\n'.format(oprec))
+		instr += encode_instr(OPCodes.DRAM_WR, oprec, dbeta_id)
 
 		mem_cnt += mem_chunk
 
 	f.write('EOL #End of layer\n')
+	instr += encode_instr(OPCodes.EOL)
 	return instr

@@ -63,7 +63,7 @@ with graph.as_default():
 
 		conv1_pool = maxPool(conv1, pooling_kernel=(1,3,3,1), stride=(1,2,2,1), pad='VALID')
 
-		conv1_pool = fork(conv1_pool)
+		conv1_pool1, conv1_pool2 = fork(conv1_pool)
 
 #################### conv2a #######################	
 	with graph.name_scope('conv2a_1'):
@@ -71,7 +71,7 @@ with graph.as_default():
 		             name='weights')
 		biases = get_tensor(shape=(256),
 		             name='biases')
-		conv2a_1 = conv2D(conv1_pool, weights, biases, stride=(1,1,1,1), pad='SAME')  
+		conv2a_1 = conv2D(conv1_pool1, weights, biases, stride=(1,1,1,1), pad='SAME')  
 
 		gamma = get_tensor(shape=(256), name='gamma')
 		beta = get_tensor(shape=(256), name='beta')
@@ -82,7 +82,7 @@ with graph.as_default():
 		             name='weights')
 		biases = get_tensor(shape=(64),
 		             name='biases')
-		conv2a_2a = conv2D(conv1_pool, weights, biases, stride=(1,1,1,1), pad='SAME')    
+		conv2a_2a = conv2D(conv1_pool2, weights, biases, stride=(1,1,1,1), pad='SAME')    
 
 		gamma = get_tensor(shape=(64), name='gamma')
 		beta = get_tensor(shape=(64), name='beta')
@@ -109,7 +109,7 @@ with graph.as_default():
 		gamma = get_tensor(shape=(256), name='gamma')
 		beta = get_tensor(shape=(256), name='beta')
 		conv2a_2c = b_norm(conv2a_2c,gamma,beta)
-		
+
 	with graph.name_scope('res2a'):
 		res2a = add([conv2a_1, conv2a_2c])
 		res2a = reLU(res2a)
@@ -124,11 +124,15 @@ with graph.as_default():
 
 
 compile_graph('resnet50/', graph, acc_obj)
-#compile_graph_bp('resnet50_bp/', graph, acc_obj)
+compile_graph_bp('resnet50_bp/', graph, acc_obj)
 
 f = open("resnet50/resnet50.bin", "rb")
 decode_instr(f)
+f.close()
 
+f = open("resnet50_bp/resnet50.bin", "rb")
+decode_instr(f)
+f.close()
 
 
 

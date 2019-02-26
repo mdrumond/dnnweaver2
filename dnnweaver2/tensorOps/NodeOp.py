@@ -11,7 +11,7 @@ class NodeOp(object):
         self.name = self.graph.get_op_name(node_name, self.op_type)
         
         self.dtype = self._get_output_dtype()
-            
+        
         if isinstance (input_tensors, Tensor):
             input_tensors = tuple([input_tensors])
         else:
@@ -50,6 +50,12 @@ class NodeOp(object):
     def _create_output_tensors(self, name):
         out_name = name
         t = self.graph.tensor(self._get_output_shape(), out_name, dtype=self.dtype, trainable=False)
+        t.op = self
+        return t
+
+    def _create_grads_tensors(self, name):
+        grad_name = name
+        t = self.graph.tensor(self.weights.shape, grad_name, dtype=self.dtype, trainable=False)
         t.op = self
         return t
 

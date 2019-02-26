@@ -69,7 +69,13 @@ class Convolution(NodeOp):
         self.group = group
 
         input_tensors = (data, weights, bias)
+
         self.dtype=dtype
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+	self.weight_grads = get_default_graph().tensor(self.weights.shape, self.weights.name+'_gd', dtype=self.weights.dtype, trainable=False)
+
+
         super(Convolution, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
@@ -174,11 +180,16 @@ class FC(NodeOp):
             assert len(pad) == 2
             self.pad = pad
 
+        self.dtype=dtype
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+	self.weight_grads = get_default_graph().tensor(self.weights.shape, self.weights.name+'_gd', dtype=self.weights.dtype, trainable=False)
+
         # Group
         self.group = group
 
         input_tensors = (data, weights, bias)
-        self.dtype=dtype
+
         super(FC, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
@@ -240,78 +251,6 @@ class FC(NodeOp):
         self.bias.data = params["bias"]
 
 
-class Convolution_BP(NodeOp):
-    def __init__(self, data, weights, output, node_name, pad='SAME', stride=None, group=1, dtype=FQDtype.FP32):
-
-        #shape=(B, IH, IW, IC)
-        self.data = data
-
-        #shape=(B, OH, OW, OC)
-        self.weights = weights
-
-	#shape=(B, KH, KW, IC, OC)
-	self.output = output
-
-	assert self.data.shape[-4] == self.weights.shape[-4] , 'Data and weight batch size do not match'
-	assert self.data.shape[-4] == self.output.shape[-5] , 'Data and output batch size do not match'
-	assert self.data.shape[-1] == self.output.shape[-2] , 'Data and output IC size do not match'
-	assert self.weights.shape[-1] == self.output.shape[-1] , 'weight and output OC size do not match'
-
-        # Stride
-        if stride is None:
-            stride = (1,1,1,1)
-        assert len(stride) == len(self.data.shape)
-        self.stride = stride
-
-        # Padding
-        if pad == 'SAME':
-            self.pad = (
-                    (0,0),
-                    (self.output.shape[-4]//2, self.output.shape[-4]//2),
-                    (self.output.shape[-3]//2, self.output.shape[-3]//2),
-                    (0,0)
-                    )
-        elif pad == 'VALID':
-            self.pad = ((0,0), (0,0), (0,0), (0,0))
-        else:
-            assert len(pad) == 2
-            self.pad = pad
-
-        # Group
-        self.group = group
-
-        input_tensors = (data, weights)
-        self.dtype=dtype
-        super(Convolution_BP, self).__init__(node_name=node_name, input_tensors=input_tensors, output_tensors=output)
-
-    def _get_output_shape(self):
-        return tuple(self.output.shape)
-
-    def _get_output_dtype(self):
-        total_bits = 64
-        total_frac_bits = self.data.dtype.frac_bits + self.weights.dtype.frac_bits
-        return FixedPoint(total_bits, total_frac_bits)
-
-    def get_ops(self):
-        num = 1
-        for i in range(len(self.data.shape)-3):
-            num *= self.data.shape[i]
-
-        cout = self.output_tensors.shape[-1]
-        cin = self.data.shape[-1]
-        hout = self.output_tensors.shape[-3]
-        wout = self.output_tensors.shape[-2]
-
-        hfil = self.weights.shape[-3]
-        wfil = self.weights.shape[-2]
-
-        mac = (wfil * hfil * cin * \
-                cout * hout * wout * \
-                num) // self.group
-
-        dtypes = (self.data.dtype, self.weights.dtype, self.output_tensors.dtype)
-
-        return {Ops.MAC(dtypes): mac}
 
 class ConvolutionBackprop(GradOp):
     def __init__(self, data, weights, output_loss, node_name, pad='SAME', stride=None, group=1, dtype=None):
@@ -471,9 +410,13 @@ class MaxPooling(NodeOp):
             self.pad = _pad
 
         input_tensors = (data)
+
         if dtype is None:
             dtype = self.data.dtype
         self.dtype=dtype
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+
         super(MaxPooling, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
@@ -566,10 +509,14 @@ class AveragePooling(NodeOp):
                     _pad.append(tuple(pad[i]))
             self.pad = _pad
 
-        input_tensors = (data)
         if dtype is None:
             dtype = self.data.dtype
         self.dtype=dtype
+
+        input_tensors = (data)
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+
         super(AveragePooling, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
@@ -783,6 +730,9 @@ class Add(NodeOp):
             dtype = data[0].dtype
 
         self.dtype=dtype
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+
         super(Add, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
@@ -805,17 +755,37 @@ class Add(NodeOp):
     def get_ops(self):
         return {}
 
-class Fork(NodeOp):
+class Fork():
     def __init__(self, data, node_name='Fork', dtype=None):
 
         self.data = data
-        input_tensors = data
+        self.input_tensors = tuple([data])
+
 
         if dtype is None:
             dtype = data.dtype
 
         self.dtype=dtype
-        super(Fork, self).__init__(node_name=node_name, input_tensors=input_tensors)
+        
+        self.graph = get_default_graph()
+        self.op_type = self._get_op_type()
+        self.name = self.graph.get_op_name(node_name, self.op_type)
+        
+	self.output_tensors = [self._create_output_tensors(self.name+'1'), self._create_output_tensors(self.name+'2')]
+	self.output_errors = [self._create_output_tensors(self.name+'1_bp'), self._create_output_tensors(self.name+'2_bp')]
+
+        self.graph.create_node(self)
+        
+        self.incoming_gradients = None
+
+
+	#super(Fork, self).__init__(node_name=node_name, input_tensors=input_tensors)
+
+    def _create_output_tensors(self, name):
+        out_name = name
+        t = self.graph.tensor(self._get_output_shape(), out_name, dtype=self.dtype, trainable=False)
+        t.op = self
+        return t
 
     def _get_output_shape(self):
         return self.data.shape
@@ -835,6 +805,9 @@ class Fork(NodeOp):
 
     def get_ops(self):
         return {}
+
+    def _get_op_type(self):
+        return self.__class__.__name__
 
 class AddBackprop(GradOp):
     def __init__(self, data, output_loss, node_name, dtype=None):
@@ -1241,6 +1214,9 @@ class ReLU(NodeOp):
         self.data = data
 
         input_tensors = (data)
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+
         self.dtype=dtype
         super(ReLU, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
@@ -1351,10 +1327,16 @@ class BNorm(NodeOp):
 	assert data.shape[-1]==beta.shape[0], 'Shape mismatch for beta'
 
         input_tensors = (data, gamma, beta)
+
 	if dtype==None:
 		self.dtype=data.dtype
 	else:
         	self.dtype=dtype
+
+	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
+	self.gamma_grads = get_default_graph().tensor(self.gamma.shape, self.gamma.name+'_gd', dtype=self.gamma.dtype, trainable=False)
+	self.beta_grads = get_default_graph().tensor(self.beta.shape, self.beta.name+'_gd', dtype=self.beta.dtype, trainable=False)
+
         super(BNorm, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
