@@ -17,6 +17,8 @@ class OPCodes:
 class ACTType:
     RELU     = 0
     SOFTMAX  = 1
+    SIGMOID  = 2
+    TANH     = 3
 
 class MACType:
     CONV     = 0

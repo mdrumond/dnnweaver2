@@ -1,8 +1,8 @@
 import logging
 from dnnweaver2.tensorOps.cnn import *
-from dnnweaver2.optimizer.optimizer import optimize_for_order, optimize_for_order_bp
+from dnnweaver2.optimizer.optimizer import optimize_for_order, optimize_for_order_bp, optimize_for_order_lstm
 
-from compiler_helpers import conv2instr, conv2instr_bp, bnorm2instr, bnorm2instr_bp, maxpool2instr, maxpool2instr_bp, eltwise_instr
+from compiler_helpers import conv2instr, conv2instr_bp, lstm2instr, bnorm2instr, bnorm2instr_bp, maxpool2instr, maxpool2instr_bp, eltwise_instr
 from custom_isa import ACTType, MACType
 
 logger = logging.getLogger('{}.{}'.format(__name__, 'Compiler'))
@@ -49,6 +49,147 @@ def get_src_error(tensor, op_dict):
 		return src[0].output_errors[out_ind]
 	else:
 		return src[0].output_errors
+
+def compile_lstm(dir_name, graph, acc_obj):
+	f = open(dir_name+"lstm.bin", "wb")
+	f.close()
+
+	op_dict = graph.op_registry
+
+	instr = []	
+
+	prec = acc_obj.prec
+
+	f_tensor = open(dir_name+"tensors.txt", "w")
+	tensor_id = {}
+	tid = 0
+	for i in graph.tensor_registry:
+		(src,dst) = tensor_nodes(i, op_dict)
+		
+		logger.debug('tensor_name:{} \t\t src:{} -> dst:{}'.format(i,src,dst))
+
+		f_tensor.write('{} {} {}\n'.format(tid, i, graph.tensor_registry[i].shape))
+		tensor_id[i] = tid
+		tid += 1
+	f_tensor.close()
+
+	for opname in op_dict:
+		op = op_dict[opname]
+		print('Op name: {}'.format(opname))
+		filename = opname.replace("/","_")
+
+		if isinstance(op, LSTM_FC):
+			data = op.input_tensors[0]
+			wf = op.input_tensors[1]
+			wi = op.input_tensors[2]
+			wc = op.input_tensors[3]
+			wo = op.input_tensors[4]
+			bf = op.input_tensors[5]
+			bi = op.input_tensors[6]
+			bc = op.input_tensors[7]
+			bo = op.input_tensors[8]
+
+			out_f = op.output_tensors[0]
+			out_i = op.output_tensors[1]
+			out_c = op.output_tensors[2]
+			out_o = op.output_tensors[3]
+
+			tensor_ids = []
+			tensor_ids.append(tensor_id[data.name])
+			tensor_ids.append(tensor_id[wf.name])
+			tensor_ids.append(tensor_id[wi.name])
+			tensor_ids.append(tensor_id[wc.name])
+			tensor_ids.append(tensor_id[wo.name])
+			tensor_ids.append(tensor_id[bf.name])			
+			tensor_ids.append(tensor_id[bi.name])	
+			tensor_ids.append(tensor_id[bc.name])	
+			tensor_ids.append(tensor_id[bo.name])	
+			tensor_ids.append(tensor_id[out_f.name])			
+			tensor_ids.append(tensor_id[out_i.name])	
+			tensor_ids.append(tensor_id[out_c.name])	
+			tensor_ids.append(tensor_id[out_o.name])	
+
+			tensor_ids = tuple(tensor_ids)
+			logger.debug('tensor_ids:{}'.format(tensor_ids))
+
+			K = wf.fpga_shape[-2]
+			O = out_f.fpga_shape[-2]
+			S = op.stride[-1]
+			IC = wf.fpga_shape[-1]
+			OC = wf.fpga_shape[-4]
+			B = data.fpga_shape[-4]
+			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{}'.format(K,O,S,IC,OC,B))
+
+			#energy_cost and im2col are hardcoded
+			energy_cost = (0,0,0,0,0,0,0,0,0,0)
+			im2col = False
+			conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
+
+			_, _, stats = optimize_for_order_lstm(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
+			instr = lstm2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False)
+
+		elif isinstance(op, LSTM_ARITH):
+			Cin = op.input_tensors[0]
+			of = op.input_tensors[1]
+			oi = op.input_tensors[2]
+			oc = op.input_tensors[3]
+			oo = op.input_tensors[4]
+
+			Cout = op.output_tensors[0]
+			hout = op.output_tensors[1]
+
+			tensor_ids = []
+			tensor_ids.append(tensor_id[Cin.name])
+			tensor_ids.append(tensor_id[of.name])
+			tensor_ids.append(tensor_id[oi.name])
+			tensor_ids.append(tensor_id[oc.name])
+			tensor_ids.append(tensor_id[oo.name])
+			tensor_ids.append(tensor_id[Cout.name])			
+			tensor_ids.append(tensor_id[hout.name])	
+
+			tensor_ids = tuple(tensor_ids)
+			logger.debug('tensor_ids:{}'.format(tensor_ids))
+
+		elif isinstance(op, FC):
+			data = op.input_tensors[0]
+			weight = op.input_tensors[1]
+			bias = op.input_tensors[2]
+			out = op.output_tensors
+
+			tensor_ids = (tensor_id[data.name], tensor_id[weight.name], tensor_id[bias.name], tensor_id[out.name])
+			logger.debug('tensor_ids:{}'.format(tensor_ids))
+
+			logger.debug('Input tensor: {}'.format(data.shape))
+			logger.debug('Weight tensor: {}'.format(weight.shape))
+			logger.debug('Bias tensor: {}'.format(bias.shape))
+			logger.debug('Output tensor: {}'.format(out.shape))
+
+			K = weight.fpga_shape[-2]
+			O = out.fpga_shape[-2]
+			S = op.stride[-1]
+			IC = weight.fpga_shape[-1]
+			OC = weight.fpga_shape[-4]
+			B = data.fpga_shape[-4]
+			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{}'.format(K,O,S,IC,OC,B))
+
+			#energy_cost and im2col are hardcoded
+			energy_cost = (0,0,0,0,0,0,0,0,0,0)
+			im2col = False
+			conv_params = (acc_obj, K, O, S, IC, OC, B, prec, im2col, energy_cost)
+
+			_, _, stats = optimize_for_order(conv_params, sequential=False, pool_kernel=None, pool_stride=None)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
+		else:
+			assert False
+
+
+		f = open(dir_name+"lstm.bin", "ab")
+		instr_bin = bytearray(instr)
+		f.write(instr_bin)
+		f.close()
+		instr = []
+
+
 
 
 

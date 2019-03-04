@@ -26,6 +26,13 @@ tile_deps_bp['OH/oh'] = {'ibuf': True,  'wbuf': False, 'obuf': True}
 tile_deps_bp['IC/ic'] = {'ibuf': True,  'wbuf': True,  'obuf': False}
 tile_deps_bp['OC/oc'] = {'ibuf': False, 'wbuf': True,  'obuf': True}
 
+tile_deps_lstm = {}
+tile_deps_lstm['B/b']   = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False}
+tile_deps_lstm['OW/ow'] = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False}
+tile_deps_lstm['OH/oh'] = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False}
+tile_deps_lstm['IC/ic'] = {'ibuf': True,  'wbuf': True,  'obuf': False, 'bbuf': False}
+tile_deps_lstm['OC/oc'] = {'ibuf': False, 'wbuf': True,  'obuf': True,  'bbuf': True}
+tile_deps_lstm['G/g'] = {'ibuf': False, 'wbuf': True,  'obuf': True,  'bbuf': True}
 
 def pe_ind(pe_x, pe_y, num_rows):
 	return pe_y*num_rows + pe_x
@@ -366,6 +373,351 @@ def conv2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B
 	print('Compute cycles: {:,}'.format(stats.compute_cycles))
 
 	return instr
+
+
+def lstm_mem_instr(f, g_ind, g, ids, mem_op='DRAM_WR', size=0, K=None):
+	instr = []
+
+	ids = ids[g_ind*g:(g_ind+1)*g]
+
+	for i in range(g):
+		f.write('{} {} {} #Memory op\n'.format(mem_op, size, ids[i]))
+		if mem_op is 'DRAM_WR':
+			instr += encode_instr(OPCodes.DRAM_WR, size, ids[i])
+		elif mem_op is 'DRAM_RD':
+			instr += encode_instr(OPCodes.DRAM_RD, size, ids[i])
+		elif mem_op is 'DRAM_RD_TP':
+			assert K is not None, 'K value is not entered.'
+			instr += encode_instr(OPCodes.DRAM_RD_TP, size, ids[i], K)
+
+	return instr
+
+lstm_activations = [ACTType.SIGMOID, ACTType.SIGMOID, ACTType.TANH, ACTType.SIGMOID]
+def lstm2instr(instr, stats, dir_name, layer_name, tensor_ids, OH, OW, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False):
+	IH = OH*S
+	IW = OW*S
+
+	data_id, wf_id, wi_id, wc_id,  wo_id, bf_id, bi_id, bc_id, bo_id, of_id, oi_id, oc_id, oo_id = tensor_ids
+
+	num_rows = acc_obj.N
+	num_cols = acc_obj.M
+	DRAM_BW = acc_obj.mem_if_width
+	iprec, wprec, bprec, oprec = acc_obj.prec
+
+	tiling = stats.tiling
+	order = stats.order
+
+	print('Order and tiling:')
+	for o in order:
+		print('{}: {}-{}'.format(o,tiling[o][0],tiling[o][1]))
+
+	ic = tiling['IC/ic'][1]
+	oc = tiling['OC/oc'][1]
+	oh = tiling['OH/oh'][1]
+	ow = tiling['OW/ow'][1]
+	b = tiling['B/b'][1]
+	g = tiling['G/g'][1]
+
+	obuf_fetch = False
+	ibuf_fetch = True
+	wbuf_fetch = True
+	bbuf_fetch = True
+
+	retire_output = False
+
+	cycle = 0
+	dram_read = 0
+	dram_write = 0
+
+
+	out_tiles_access = np.zeros((tiling['OH/oh'][0],tiling['OW/ow'][0],tiling['OC/oc'][0],tiling['B/b'][0],tiling['G/g'][0]))
+
+	f= open(dir_name+layer_name+".txt","w")
+
+	for n in range(tiling[order[5]][0]):
+		if order[5]=='OC/oc':
+			oc_ind = n
+		if order[5]=='B/b':
+			b_ind = n
+		if order[5]=='OW/ow':
+			ow_ind = n
+		if order[5]=='OH/oh':
+			oh_ind = n
+		if order[5]=='IC/ic':
+			ic_ind = n
+		if order[5]=='G/g':
+			g_ind = n
+
+		for i in range(tiling[order[4]][0]):
+			if order[4]=='OC/oc':
+				oc_ind = i
+			if order[4]=='B/b':
+				b_ind = i
+			if order[4]=='OW/ow':
+				ow_ind = i
+			if order[4]=='OH/oh':
+				oh_ind = i
+			if order[4]=='IC/ic':
+				ic_ind = i
+			if order[4]=='G/g':
+				g_ind = i
+
+			for j in range(tiling[order[3]][0]):
+				if order[3]=='OC/oc':
+					oc_ind = j
+				if order[3]=='B/b':
+					b_ind = j
+				if order[3]=='OW/ow':
+					ow_ind = j
+				if order[3]=='OH/oh':
+					oh_ind = j
+				if order[3]=='IC/ic':
+					ic_ind = j
+				if order[3]=='G/g':
+					g_ind = j
+
+				for k in range(tiling[order[2]][0]):
+					if order[2]=='OC/oc':
+						oc_ind = k
+					if order[2]=='B/b':
+						b_ind = k
+					if order[2]=='OW/ow':
+						ow_ind = k
+					if order[2]=='OH/oh':
+						oh_ind = k
+					if order[2]=='IC/ic':
+						ic_ind = k
+					if order[2]=='G/g':
+						g_ind = k
+
+					for l in range(tiling[order[1]][0]):
+						if order[1]=='OC/oc':
+							oc_ind = l
+						if order[1]=='B/b':
+							b_ind = l
+						if order[1]=='OW/ow':
+							ow_ind = l
+						if order[1]=='OH/oh':
+							oh_ind = l
+						if order[1]=='IC/ic':
+							ic_ind = l
+						if order[1]=='G/g':
+							g_ind = l
+
+						for m in range(tiling[order[0]][0]):
+							if order[0]=='OC/oc':
+								oc_ind = m
+							if order[0]=='B/b':
+								b_ind = m
+							if order[0]=='OW/ow':
+								ow_ind = m
+							if order[0]=='OH/oh':
+								oh_ind = m
+							if order[0]=='IC/ic':
+								ic_ind = m
+							if order[0]=='G/g':
+								g_ind = m							
+
+							if ic_ind == tiling['IC/ic'][0]-1:
+								retire_output = True
+
+							_oc = min(oc,OC-oc_ind*oc)
+							_b = min(b,B-b_ind*b)
+							_ow = min(ow,OW-ow_ind*ow)
+							_oh = min(oh,OH-oh_ind*oh)
+							_ic = min(ic,IC-ic_ind*ic)
+
+							kw = K
+							kh = K
+							_iw = K + (_ow - 1) * S
+							_ih = K + (_oh - 1) * S
+							data_tile_size = _iw*_ih*_ic*_b*iprec
+							weight_tile_size = kw*kh*_ic*_oc*wprec
+							bias_tile_size = _oc*bprec
+							output_tile_size = _oh*_ow*_oc*_b*oprec
+
+							if obuf_fetch == True:
+								dram_write += output_tile_size*g
+								instr += lstm_mem_instr(f, g_ind, g, [of_id,oi_id,oc_id,oo_id], 'DRAM_WR', output_tile_size)
+								cycle += int(math.ceil(float(output_tile_size*g) / DRAM_BW))
+
+								if out_tiles_access[oh_ind,ow_ind,oc_ind,b_ind,g_ind]>0: #Skip reading output tile if it is first time
+									dram_read += output_tile_size*g
+									instr += lstm_mem_instr(f, g_ind, g, [of_id,oi_id,oc_id,oo_id], 'DRAM_RD', output_tile_size)
+									cycle += int(math.ceil(float(output_tile_size*g) / DRAM_BW))
+								
+								out_tiles_access[oh_ind,ow_ind,oc_ind,b_ind,g_ind] = out_tiles_access[oh_ind,ow_ind,oc_ind,b_ind,g_ind] + 1
+
+								obuf_fetch = False
+
+							if ibuf_fetch == True:
+								dram_read += data_tile_size
+
+								f.write('DRAM_RD {} {} #Read input tile\n'.format(data_tile_size, data_id))
+								instr += encode_instr(OPCodes.DRAM_RD, data_tile_size, data_id)
+
+								cycle += int(math.ceil(float(data_tile_size) / DRAM_BW))
+								ibuf_fetch = False
+
+							if wbuf_fetch == True:
+								dram_read += weight_tile_size
+								if transpose_weight == True:
+									instr += lstm_mem_instr(f, g_ind, g, [wf_id,wi_id,wc_id,wo_id], 'DRAM_RD_TP', weight_tile_size, K)
+									f.write('DRAM_RD_TP {} {} {} #Read weight tile\n'.format(weight_tile_size, weight_id, K))
+									instr += encode_instr(OPCodes.DRAM_RD_TP, weight_tile_size, weight_id, K)
+								else:
+									instr += lstm_mem_instr(f, g_ind, g, [wf_id,wi_id,wc_id,wo_id], 'DRAM_RD', weight_tile_size)
+								cycle += int(math.ceil(float(weight_tile_size) / DRAM_BW))
+								wbuf_fetch = False
+
+							if bbuf_fetch == True:
+								dram_read += bias_tile_size
+								instr += lstm_mem_instr(f, g_ind, g, [bf_id,bi_id,bc_id,bo_id], 'DRAM_RD', bias_tile_size)
+								cycle += int(math.ceil(float(bias_tile_size) / DRAM_BW))
+								bbuf_fetch = False
+							
+							
+							compute_cycles_per_pe = math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b
+							
+							for _g in range(g):
+								f.write('ALU {} #Compute inner loop \n'.format(int(compute_cycles_per_pe)))
+								instr += encode_instr(OPCodes.MAC, int(compute_cycles_per_pe), mac_type)
+
+								if retire_output==True:
+									f.write('ACT {} {} #Apply activation function \n'.format(int(math.ceil(float(_oc)/num_cols)), lstm_activations[_g+g_ind*g]))
+									instr += encode_instr(OPCodes.ACT, int(math.ceil(float(_oc)/num_cols)), lstm_activations[_g+g_ind*g])
+
+							cycle += math.ceil(float(_ic)/num_rows) * math.ceil(float(_oc)/num_cols) * kw * kh * _oh * _ow * _b  * g
+							if retire_output==True:
+								cycle += 2 * math.ceil(float(_oc)/num_cols) * _oh * _ow * _b * g
+								retire_output = False
+
+							if tile_deps_lstm[order[0]]['obuf'] == True:
+								obuf_fetch = True
+							if tile_deps_lstm[order[0]]['ibuf'] == True:
+								ibuf_fetch = True
+							if tile_deps_lstm[order[0]]['wbuf'] == True:
+								wbuf_fetch = True
+							if tile_deps_lstm[order[0]]['bbuf'] == True:
+								bbuf_fetch = True
+
+						if tile_deps_lstm[order[1]]['obuf'] == True:
+							obuf_fetch = True
+						if tile_deps_lstm[order[1]]['ibuf'] == True:
+							ibuf_fetch = True
+						if tile_deps_lstm[order[1]]['wbuf'] == True:
+							wbuf_fetch = True
+						if tile_deps_lstm[order[1]]['bbuf'] == True:
+							bbuf_fetch = True
+
+					if tile_deps_lstm[order[2]]['obuf'] == True:
+						obuf_fetch = True
+					if tile_deps_lstm[order[2]]['ibuf'] == True:
+						ibuf_fetch = True
+					if tile_deps_lstm[order[2]]['wbuf'] == True:
+						wbuf_fetch = True
+					if tile_deps_lstm[order[2]]['bbuf'] == True:
+						bbuf_fetch = True
+
+				if tile_deps_lstm[order[3]]['obuf'] == True:
+					obuf_fetch = True
+				if tile_deps_lstm[order[3]]['ibuf'] == True:
+					ibuf_fetch = True
+				if tile_deps_lstm[order[3]]['wbuf'] == True:
+					wbuf_fetch = True
+				if tile_deps_lstm[order[3]]['bbuf'] == True:
+					bbuf_fetch = True
+
+			if tile_deps_lstm[order[4]]['obuf'] == True:
+				obuf_fetch = True
+			if tile_deps_lstm[order[4]]['ibuf'] == True:
+				ibuf_fetch = True
+			if tile_deps_lstm[order[4]]['wbuf'] == True:
+				wbuf_fetch = True
+			if tile_deps_lstm[order[4]]['bbuf'] == True:
+				bbuf_fetch = True
+
+		if tile_deps_lstm[order[5]]['obuf'] == True:
+			obuf_fetch = True
+		if tile_deps_lstm[order[5]]['ibuf'] == True:
+			ibuf_fetch = True
+		if tile_deps_lstm[order[5]]['wbuf'] == True:
+			wbuf_fetch = True
+		if tile_deps_lstm[order[5]]['bbuf'] == True:
+			bbuf_fetch = True
+
+	dram_write += output_tile_size*g
+	instr += lstm_mem_instr(f, g_ind, g, [of_id,oi_id,oc_id,oo_id], 'DRAM_WR', output_tile_size)
+	cycle += int(math.ceil(float(output_tile_size*g) / DRAM_BW))
+
+	f.write('EOL #End of layer\n')
+	instr += encode_instr(OPCodes.EOL)
+	f.close()
+
+	print('Total DRAM read simulated: {:,}'.format(dram_read))
+	print('Total DRAM write simulated: {:,}'.format(dram_write))
+	print('Total cycles simulated: {:,}'.format(cycle))
+
+	print('Memory cycles: {:,}'.format(stats.memory_cycles_required))
+	print('Compute cycles: {:,}'.format(stats.compute_cycles))
+
+	return instr
+
+def lstm_arithm_instr(instr, dir_name, name, tensor_ids, H, acc_obj):
+	Cin_id, of_id, oi_id, oc_id, oo_id, Cout_id, hout_id = tensor_ids
+
+	N = acc_obj.N
+	M = acc_obj.M
+	oprec = acc_obj.prec[3]
+
+	input_output_size = H*oprec
+	
+	r=1 #large r means larger data chunks, less instructions.
+	mem_chunk = N*M*oprec*r
+	
+	f= open(dir_name+name+".txt","w")
+
+	mem_cnt = 0
+	while mem_cnt < input_output_size:
+		f.write('DRAM_RD {} {} #Read vec1\n'.format(mem_chunk, Cin_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, Cin_id)
+		f.write('DRAM_RD {} {} #Read vec2\n'.format(mem_chunk, of_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, of_id)
+		f.write('ALU {} {} #Vector op \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_RD {} {} #Read vec1\n'.format(mem_chunk, oi_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oi_id)
+		f.write('DRAM_RD {} {} #Read vec2\n'.format(mem_chunk, oc_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oc_id)
+		f.write('ALU {} {} #Vector op \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('ALU {} {} #Vector op \n'.format('Add', r))
+		instr += encode_instr(OPCodes.ADD, r)
+
+		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, Cout_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, Cout_id)
+		
+		f.write('ACT {} #Apply activation function \n'.format('TANH'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.TANH)			
+
+		f.write('DRAM_RD {} {} #Read vec1\n'.format(mem_chunk, oo_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oo_id)
+
+		f.write('ALU {} {} #Vector op \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, hout_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, hout_id)
+
+		mem_cnt += mem_chunk
+
+	f.write('EOL #End of layer\n')
+	instr += encode_instr(OPCodes.EOL)
+
+	return instr
+
 
 # https://www.jefkine.com/general/2016/09/05/backpropagation-in-convolutional-neural-networks/
 # http://neuralnetworksanddeeplearning.com/chap2.html

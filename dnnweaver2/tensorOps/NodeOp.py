@@ -24,9 +24,6 @@ class NodeOp(object):
                     it.append(_it)
             input_tensors = tuple(it)
             
-        # input_str = ','.join([x.__str__() for x in input_tensors])
-        # print('## Creating op with name {} and inputs {}'.format(node_name, input_str))
-
         self.input_tensors = input_tensors
 	if output_tensors==None:
         	self.output_tensors = self._create_output_tensors(self.name)
