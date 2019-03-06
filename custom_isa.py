@@ -19,6 +19,13 @@ class ACTType:
     SOFTMAX  = 1
     SIGMOID  = 2
     TANH     = 3
+    RELU_DER = 4
+    SOFTMAX_DER  = 5
+    SIGMOID_DER  = 6
+    TANH_DER     = 7    
+    SOFTMAX_INV  = 8
+    SIGMOID_INV  = 9
+    TANH_INV     = 10    
 
 class MACType:
     CONV     = 0

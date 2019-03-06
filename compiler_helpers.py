@@ -3,7 +3,6 @@ import logging
 import numpy as np
 
 from dnnweaver2.compiler import GraphCompiler
-from dnnweaver2.compiler.bp_compiler import BP_GraphCompiler, MacroNode
 from dnnweaver2.benchmarks import get_graph
 from dnnweaver2.graph import Graph
 from dnnweaver2 import get_tensor
@@ -710,6 +709,145 @@ def lstm_arithm_instr(instr, dir_name, name, tensor_ids, H, acc_obj):
 
 		f.write('DRAM_WR {} {} #Write back output\n'.format(mem_chunk, hout_id))
 		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, hout_id)
+
+		mem_cnt += mem_chunk
+
+	f.write('EOL #End of layer\n')
+	instr += encode_instr(OPCodes.EOL)
+
+	return instr
+
+def lstm_arithm_bp_instr(instr, dir_name, name, tensor_ids, H, acc_obj):
+	Cin_id, Cin_bp_id, of_id, of_bp_id, oi_id, oi_bp_id, oc_id, oc_bp_id, oo_id, oo_bp_id, Cout_id, Cout_bp_id, hout_id, hout_bp_id = tensor_ids
+
+	N = acc_obj.N
+	M = acc_obj.M
+	oprec = acc_obj.prec[3]
+
+	input_output_size = H*oprec
+	
+	r=1 #large r means larger data chunks, less instructions.
+	mem_chunk = N*M*oprec*r
+	
+	f= open(dir_name+name+".txt","w")
+
+	mem_cnt = 0
+	while mem_cnt < input_output_size:
+		f.write('DRAM_RD {} {} #Read hout_bp\n'.format(mem_chunk, hout_bp_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, hout_bp_id)
+
+		f.write('DRAM_RD {} {} #Read Cout\n'.format(mem_chunk, Cout_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, Cout_id)
+
+		f.write('DRAM_RD {} {} #Read Cout_bp\n'.format(mem_chunk, Cout_bp_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, Cout_bp_id)
+
+		f.write('DRAM_RD {} {} #Read oo\n'.format(mem_chunk, oo_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oo_id)
+
+		f.write('DRAM_RD {} {} #Read oc\n'.format(mem_chunk, oc_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oc_id)
+
+		f.write('DRAM_RD {} {} #Read oi\n'.format(mem_chunk, oi_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, oi_id)
+
+		f.write('DRAM_RD {} {} #Read of\n'.format(mem_chunk, of_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, of_id)
+
+		f.write('DRAM_RD {} {} #Read Cin\n'.format(mem_chunk, Cin_id))
+		instr += encode_instr(OPCodes.DRAM_RD, mem_chunk, Cin_id)
+
+
+		f.write('ACT {} #TANH(Cout) \n'.format('TANH'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.TANH)
+
+		f.write('ALU {} {} #hout_bp*TANH(Cout)->Oo_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+
+		f.write('ACT {} #SIGMOID_INV(Oo) -> Zo \n'.format('SIGMOID_INV'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_INV)
+
+		f.write('ACT {} #SIGMOID_DER(Zo) \n'.format('SIGMOID_DER'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_DER)
+
+		f.write('ALU {} {} #Oo_bp*SIGMOID_DER(Zo)->Zo_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_WR {} {} #Write Oo_bp\n'.format(mem_chunk, oo_bp_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, oo_bp_id)
+
+
+
+		f.write('ALU {} {} #hout_bp*Oo \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('ACT {} #TANH_DER(Cout) \n'.format('TANH_DER'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.TANH_DER)
+
+		f.write('ALU {} {} #hout_bp*Oo*TANH_DER(Cout) \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('ALU {} {} #hout_bp*Oo*TANH_DER(Cout)+Cout_bp -> tmp_res \n'.format('Add', r))
+		instr += encode_instr(OPCodes.ADD, r)
+
+
+
+		f.write('ALU {} {} #tmp_res*oi -> oc_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)		
+
+		f.write('ACT {} #TANH_INV(Oc) -> Zc \n'.format('TANH_INV'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.TANH_INV)
+
+		f.write('ACT {} #TANH_DER(Zc) \n'.format('TANH_DER'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_DER)
+
+		f.write('ALU {} {} #Oo_bp*SIGMOID_DER(Zo)->Zo_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_WR {} {} #Write back oc_bp\n'.format(mem_chunk, oc_bp_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, oc_bp_id)
+
+
+		f.write('ALU {} {} #tmp_res*oc \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)	
+
+		f.write('ACT {} #SIGMOID_INV(Oi) -> Zi \n'.format('SIGMOID_INV'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_INV)
+
+		f.write('ACT {} #SIGMOID_DER(Zi) \n'.format('SIGMOID_DER'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_DER)
+
+		f.write('ALU {} {} #Oi_bp*SIGMOID_DER(Zi)->Zi_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_WR {} {} #Write back oi_bp\n'.format(mem_chunk, oi_bp_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, oi_bp_id)
+
+
+
+		f.write('ALU {} {} #tmp_res*Cin \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)	
+
+		f.write('ACT {} #SIGMOID_INV(Of) -> Zf \n'.format('SIGMOID_INV'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_INV)
+
+		f.write('ACT {} #SIGMOID_DER(Zf) \n'.format('SIGMOID_DER'))
+		instr += encode_instr(OPCodes.ACT, r, ACTType.SIGMOID_DER)
+
+		f.write('ALU {} {} #Of_bp*SIGMOID_DER(Zf)->Zf_bp \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)
+
+		f.write('DRAM_WR {} {} #Write back of_bp\n'.format(mem_chunk, of_bp_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, of_bp_id)
+
+
+		f.write('ALU {} {} #tmp_res*of \n'.format('Mult', r))
+		instr += encode_instr(OPCodes.MULT, r)	
+
+		f.write('DRAM_WR {} {} #Write back Cin_bp\n'.format(mem_chunk, Cin_bp_id))
+		instr += encode_instr(OPCodes.DRAM_WR, mem_chunk, Cin_bp_id)
+
 
 		mem_cnt += mem_chunk
 
