@@ -27,8 +27,8 @@ num_rows = 2
 num_cols = 2
 
 bram = {
-    'ibuf':            num_cols * iprec * 2048 / 2,
-    'obuf':            num_rows * oprec * 2048 / 2,
+    'ibuf':            10*num_cols * iprec * 2048 / 2,
+    'obuf':            10*num_rows * oprec * 2048 / 2,
     'wbuf': num_cols * num_rows * wprec *  512 / 2,
     'bbuf':            num_rows * bprec * 2048 / 2,
 }
@@ -127,11 +127,11 @@ compile_graph('resnet50/', graph, acc_obj)
 compile_graph_bp('resnet50_bp/', graph, acc_obj)
 
 f = open("resnet50/resnet50.bin", "rb")
-decode_instr(f)
+#decode_instr(f)
 f.close()
 
 f = open("resnet50_bp/resnet50.bin", "rb")
-decode_instr(f)
+#decode_instr(f)
 f.close()
 
 

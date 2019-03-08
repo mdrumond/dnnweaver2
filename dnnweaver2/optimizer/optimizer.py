@@ -17,7 +17,11 @@ logger.setLevel(logging.ERROR)
 
 class OP_TYPE:
     FW     = 0
-    GD     = 1
+    BP	   = 1
+    GD     = 2
+    LSTM_FW = 3
+    LSTM_BP = 4
+    LSTM_GD = 5
 
 tile_deps = {}
 tile_deps['B/b']   = {'ibuf': True,  'wbuf': False, 'obuf': True,  'bbuf': False}
@@ -33,7 +37,6 @@ def optimize_for_order(conv_params, sequential=True, op_type=None):
     loops = ['B/b', 'OW/ow', 'OH/oh', 'IC/ic', 'OC/oc', 'G/g']
     order = set(permutations(loops))
 
-    return_dict = {}
     acc_obj, K, O, S, IC, OC, B, G, energy_cost = conv_params
 
     if not sequential:
@@ -48,6 +51,7 @@ def optimize_for_order(conv_params, sequential=True, op_type=None):
 
             best_cycles = None
 	    best_energy = None
+	    best_tiling = None
             for r in results:
 		tiling, order_type, cycles, energy = r
 		
@@ -56,8 +60,10 @@ def optimize_for_order(conv_params, sequential=True, op_type=None):
 		    best_energy = energy
                     best_tiling = tiling
                     best_order = order_type
-	    	    #print('Order:{} Tiling:{} Cycles:{} Energy:{}'.format(order_type, tiling, cycles, energy))
+	    	    logger.debug('Order:{} Tiling:{} Cycles:{} Energy:{}'.format(order_type, tiling, cycles, energy))
 
+	    assert best_tiling is not None, 'Optimizer failed! Increase memory or loose constraints!'
+		
 	    stats = get_stats_fast(conv_params, op_type, best_tiling, best_order, verbose=True)
             return best_tiling, best_order, stats
 
@@ -71,20 +77,19 @@ def optimize_for_order(conv_params, sequential=True, op_type=None):
         best_tiling = None
         best_order  = None
         for o in order:
-            tiling, order_type, cycles,  energy = _optimize_for_order(conv_params, backprop, o)
+            tiling, order_type, cycles,  energy = _optimize_for_order(conv_params, op_type, o)
             if best_cycles is None or best_cycles > cycles:
                 best_cycles = cycles
                 best_tiling = tiling
                 best_order  = order_type
 
-	stats = get_stats_fast(conv_params, best_tiling, best_order, verbose=True)
+	stats = get_stats_fast(conv_params, op_type, best_tiling, best_order, verbose=True)
 
         return best_tiling, best_order, stats
 
 def _optimize_for_order(conv_params, op_type, order_type, verbose=False, ):
 
     acc_obj, K, O, S, IC, OC, B, G, energy_cost = conv_params
-    I = (O - 1) * S + K
 
     # We do not tile the "K" dimension and compute an entire 2-D conv at a time
     num_G_tiles = int(math.ceil(log2(G))) + 1
@@ -113,6 +118,12 @@ def _optimize_for_order(conv_params, op_type, order_type, verbose=False, ):
 		    oh = ow
 		    num_ow = ceil_a_by_b(O, ow)
 		    num_oh = ceil_a_by_b(O, oh)
+
+		    ih = (oh - 1) * S + K
+		    iw = (ow - 1) * S + K
+
+		    if oh<K or ow<K or ih<K or iw<K:
+			continue
 
 		    if num_ow * ow != O:
 			continue
@@ -149,8 +160,8 @@ def _optimize_for_order(conv_params, op_type, order_type, verbose=False, ):
 				best_mem_cycles = mem_cycles
 				best_order = order_type
 				best_tiling = tiling
-
-			    	#print('Order:{} Tiling:{} Cycles:{:,} Energy:{:,}'.format(order_type,tiling,cycles,energy))
+			    
+		    	    	logger.debug('Order:{} Tiling:{} Cycles:{:,} Energy:{:,}'.format(order_type,tiling,cycles,energy))
 
     return (best_tiling, order_type, best_cycles, best_energy)
 
@@ -175,10 +186,12 @@ def get_stats_fast(conv_params, op_type, tiling, order_type, verbose=False):
     stats.tiling = tiling
     stats.order = order_type
 
-    if op_type == OP_TYPE.FW:
-    	stats, writes, reads = memory_access_fw(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_ic, num_oh, num_ow, num_oc, num_b, num_g)
-    elif op_type == OP_TYPE.GD:
-	stats, writes, reads = memory_access_gd(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_ic, num_oh, num_ow, num_oc, num_b, num_g)
+    if op_type == OP_TYPE.FW or op_type == OP_TYPE.LSTM_FW:
+    	stats, writes, reads = memory_access_fw(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g)
+    elif op_type == OP_TYPE.GD or op_type == OP_TYPE.LSTM_GD:
+	stats, writes, reads = memory_access_gd(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g)
+    elif op_type == OP_TYPE.BP or op_type == OP_TYPE.LSTM_BP:
+	stats, writes, reads = memory_access_bp(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g)
     else:
 	assert False
 
@@ -198,7 +211,7 @@ def get_stats_fast(conv_params, op_type, tiling, order_type, verbose=False):
         max_read_size[namespace] = reads[namespace]
 
     rd_cache_hit = {'wbuf': True, 'ibuf': True, 'obuf': True, 'bbuf': True}
-    wr_cache_hit = {'wbuf': True, 'obuf': True}
+    wr_cache_hit = {'wbuf': True, 'obuf': True, 'ibuf': True}
     if verbose:
         logger.debug('Initialize reads/writes')
         logger.debug('\tTiling: {}'.format(tiling))
@@ -240,6 +253,8 @@ def get_stats_fast(conv_params, op_type, tiling, order_type, verbose=False):
         stats.reads[namespace] = reads[namespace]
         stats.writes['dram'] += reads[namespace]
 
+    num_tiles = num_g * num_b * num_ow * num_oh * num_ic * num_oc
+
     # TODO: update
     stats.initial_dram_reads = 0
     stats.final_dram_writes = 0
@@ -254,9 +269,11 @@ def get_stats_fast(conv_params, op_type, tiling, order_type, verbose=False):
     stats.middle_dram_accesses = stats.total_dram_accesses - stats.initial_dram_reads - stats.final_dram_writes
 
     if verbose:
-	    logger.debug('Compute cycle per tile : {:>20,}'.format(acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh)))
+	    logger.debug('Compute cycle per tile : {:>20,}'.format(acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh, g)))
 	    logger.debug('# of tiles : {:>20,}'.format(num_tiles))
-    stats.compute_cycles = num_tiles * g * acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh)
+
+    stats.compute_cycles = num_tiles * acc_obj.get_compute_cycles(ic, oc, ow, oh, b, kw, kh, g)
+
     stats.memory_cycles_required = ceil_a_by_b(stats.middle_dram_accesses, acc_obj.mem_if_width)
 
     memory_stalls = max(0, stats.memory_cycles_required - stats.compute_cycles) + latency
@@ -270,9 +287,7 @@ def get_stats_fast(conv_params, op_type, tiling, order_type, verbose=False):
 	logger.debug('Total_cycles  : {:>20,}'.format(stats.total_cycles))
     return stats
 
-
-
-def memory_access_fw(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_ic, num_oh, num_ow, num_oc, num_b, num_g, verbose=False):
+def memory_access_fw(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, verbose=False):
     iprec, wprec, bprec, oprec = acc_obj.prec
 
     writes = {}
@@ -284,49 +299,9 @@ def memory_access_fw(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_i
     
     reads['obuf'] = ow * oh * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * b * g * oprec
 
-    is_loop = ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * g
-    os_loop = ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw
-    ws_loop = b * oh * ow
-    # Input Stationary energy
-    # kw * kh * ic * oh * ow * b -> oc
-    is_energy = (os_loop * ws_loop) * (iprec    + is_loop * (wprec + oprec))
-    # Output Stationary energy
-    # oc * oh * ow * b -> kw * kh * ic
-    os_energy = (is_loop * ws_loop) * (oprec    + os_loop * (iprec + wprec))
-    # Weight Stationary energy
-    # kw * kh * ic * oc -> b * ow * oh
-    ws_energy = (os_loop * is_loop) * (wprec    + ws_loop * (iprec + oprec))
-
-    min_energy = min(is_energy, ws_energy, os_energy)
-    num_tiles = num_g * num_b * num_ow * num_oh * num_ic * num_oc
-
-    if is_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Input Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g *oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * oprec
-        stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * wprec
-
-    elif os_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Output Stationary')
-        stats.reads['ibuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * iprec
-        stats.reads['obuf'] += num_tiles * (oc * oh * ow * b * g) * oprec
-        stats.writes['obuf'] += num_tiles * (oc * oh * ow * b * g) * oprec
-        stats.reads['wbuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * wprec
-
-    else:
-        if verbose:
-            logger.debug('SRAM access order: Weight Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * oprec
-        stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oc * g) * wprec
-
     return stats, writes, reads
 
-def memory_access_bp(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_ic, num_oh, num_ow, num_oc, num_b, num_g, verbose=False):
+def memory_access_bp(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, verbose=False):
     iprec, wprec, bprec, oprec = acc_obj.prec
 
     writes = {}
@@ -338,50 +313,9 @@ def memory_access_bp(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_i
     
     reads['ibuf'] = iw * ih * ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * b * iprec
 
-    is_loop = ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * g
-    os_loop = ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw
-    ws_loop = b * oh * ow
-    # Input Stationary energy
-    # kw * kh * ic * oh * ow * b -> oc
-    is_energy = (os_loop * ws_loop) * (iprec    + is_loop * (wprec + oprec))
-    # Output Stationary energy
-    # oc * oh * ow * b -> kw * kh * ic
-    os_energy = (is_loop * ws_loop) * (oprec    + os_loop * (iprec + wprec))
-    # Weight Stationary energy
-    # kw * kh * ic * oc -> b * ow * oh
-    ws_energy = (os_loop * is_loop) * (wprec    + ws_loop * (iprec + oprec))
-
-    min_energy = min(is_energy, ws_energy, os_energy)
-    num_tiles = num_g * num_b * num_ow * num_oh * num_ic * num_oc
-
-    if is_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Input Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g *oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * oprec
-        stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * wprec
-
-    elif os_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Output Stationary')
-        stats.reads['ibuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * iprec
-        stats.reads['obuf'] += num_tiles * (oc * oh * ow * b * g) * oprec
-        stats.writes['obuf'] += num_tiles * (oc * oh * ow * b * g) * oprec
-        stats.reads['wbuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * wprec
-
-    else:
-        if verbose:
-            logger.debug('SRAM access order: Weight Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * oprec
-        stats.writes['obuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * oprec
-        stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oc * g) * wprec
-
     return stats, writes, reads
 
-
-def memory_access_gd(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_ic, num_oh, num_ow, num_oc, num_b, num_g, verbose=False):
+def memory_access_gd(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, verbose=False):
     iprec, wprec, bprec, oprec = acc_obj.prec
 
     writes = {}
@@ -393,46 +327,4 @@ def memory_access_gd(stats, acc_obj, ih, iw, ic, kh, kw, oh, ow, oc, b, g, num_i
 
     reads['wbuf'] = ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw * ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * g * wprec
 
-    is_loop = ceil_a_by_b(oc, acc_obj.M) * acc_obj.M * g
-    os_loop = ceil_a_by_b(ic, acc_obj.N) * acc_obj.N * kh * kw
-    ws_loop = b * oh * ow
-    # Input Stationary energy
-    # kw * kh * ic * oh * ow * b -> oc
-    is_energy = (os_loop * ws_loop) * (iprec    + is_loop * (wprec + oprec))
-    # Output Stationary energy
-    # oc * oh * ow * b -> kw * kh * ic
-    os_energy = (is_loop * ws_loop) * (oprec    + os_loop * (iprec + wprec))
-    # Weight Stationary energy
-    # kw * kh * ic * oc -> b * ow * oh
-    ws_energy = (os_loop * is_loop) * (wprec    + ws_loop * (iprec + oprec))
-
-    min_energy = min(is_energy, ws_energy, os_energy)
-
-    num_tiles = num_g * num_b * num_ow * num_oh * num_ic * num_oc
-
-    if is_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Input Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * oprec
-        stats.writes['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * wprec
-        stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oh * ow * b) * oc * g * wprec
-
-    elif os_energy == min_energy:
-        if verbose:
-            logger.debug('SRAM access order: Output Stationary')
-        stats.reads['ibuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * iprec
-        stats.reads['obuf'] += num_tiles * (oc * oh * ow * b * g) * oprec
-        stats.writes['wbuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * wprec
-        stats.reads['wbuf'] += num_tiles * (oc * oh * ow * b * g) * (kw * kh * ic) * wprec
-
-    else:
-        if verbose:
-            logger.debug('SRAM access order: Weight Stationary')
-        stats.reads['ibuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * iprec
-        stats.reads['obuf'] += num_tiles * (kw * kh * ic * oc * g) * (b * ow * oh) * oprec
-        stats.writes['wbuf'] += num_tiles * (kw * kh * ic * oc * g) * wprec
-	stats.reads['wbuf'] += num_tiles * (kw * kh * ic * oc * g) * wprec
-
     return stats, writes, reads
-

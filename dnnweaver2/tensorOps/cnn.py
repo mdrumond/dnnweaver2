@@ -91,9 +91,7 @@ class Convolution(NodeOp):
         return tuple(out_shape)
 
     def _get_output_dtype(self):
-        total_bits = 64
-        total_frac_bits = self.data.dtype.frac_bits + self.weights.dtype.frac_bits
-        return FixedPoint(total_bits, total_frac_bits)
+	return self.dtype
 
     def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
         self.output_loss = self._get_incoming_gradients(y, grad_dtype)
@@ -324,8 +322,27 @@ class LSTM_FC():
         t[2].op = self
         t.append(self.graph.tensor(self._get_output_shape(), self.name+'_outo', dtype=self.dtype, trainable=False))
         t[3].op = self
-
 	self.output_tensors = t
+
+        t = [self.graph.tensor(self.weights[0].shape, self.name+'_outf_gd', dtype=self.dtype, trainable=False)]
+        t[0].op = self
+        t.append(self.graph.tensor(self.weights[0].shape, self.name+'_outi_gd', dtype=self.dtype, trainable=False))
+        t[1].op = self
+        t.append(self.graph.tensor(self.weights[0].shape, self.name+'_outc_gd', dtype=self.dtype, trainable=False))
+        t[2].op = self
+        t.append(self.graph.tensor(self.weights[0].shape, self.name+'_outo_gd', dtype=self.dtype, trainable=False))
+        t[3].op = self
+	self.weight_grads = t
+
+        t = [self.graph.tensor(self._get_output_shape(), self.name+'_outf_bp', dtype=self.dtype, trainable=False)]
+        t[0].op = self
+        t.append(self.graph.tensor(self._get_output_shape(), self.name+'_outi_bp', dtype=self.dtype, trainable=False))
+        t[1].op = self
+        t.append(self.graph.tensor(self._get_output_shape(), self.name+'_outc_bp', dtype=self.dtype, trainable=False))
+        t[2].op = self
+        t.append(self.graph.tensor(self._get_output_shape(), self.name+'_outo_bp', dtype=self.dtype, trainable=False))
+        t[3].op = self
+	self.output_errors = t
 
         self.input_loss = [None]*len(input_tensors)
 
@@ -348,9 +365,7 @@ class LSTM_FC():
         return tuple(out_shape)
 
     def _get_output_dtype(self):
-        total_bits = 64
-        total_frac_bits = self.data.dtype.frac_bits + self.weights[0].dtype.frac_bits
-        return FixedPoint(total_bits, total_frac_bits)
+        return self.dtype
 
     def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
         self.output_loss = self._get_incoming_gradients(y, grad_dtype)
@@ -438,6 +453,14 @@ class LSTM_ARITH():
         t[1].op = self
 
 	self.output_tensors = t
+
+	self.output_errors = []
+	self.output_errors.append(get_default_graph().tensor(self._get_output_shape(), name='C_bp', dtype=dtype, trainable=False))
+	self.output_errors.append(get_default_graph().tensor(self._get_output_shape(), name='h_bp', dtype=dtype, trainable=False))	
+	
+
+	self.output_errors[0].op = self
+	self.output_errors[1].op = self
 
         self.input_loss = [None]*len(input_tensors)
 
@@ -641,23 +664,7 @@ class MaxPooling(NodeOp):
         return self.input_loss[0]
 
     def get_ops(self):
-        num = 1
-        for i in range(len(self.output_tensors.shape)-3):
-            num *= self.data.shape[i]
-
-        cout = self.output_tensors.shape[-3]
-        hout = self.output_tensors.shape[-2]
-        wout = self.output_tensors.shape[-1]
-
-        hfil = self.pooling_kernel[-2]
-        wfil = self.pooling_kernel[-1]
-
-        CMP = hfil * wfil *\
-                hout * wout * cout *\
-                num
-
-        dtypes = (self.data.dtype)
-        return {Ops.CMP(dtypes): CMP}
+        return {}
 
 class AveragePooling(NodeOp):
     def __init__(self, data, pooling_kernel, node_name, pad='VALID', stride=None, dtype=None):
@@ -741,23 +748,7 @@ class AveragePooling(NodeOp):
         return self.input_loss[0]
 
     def get_ops(self):
-        num = 1
-        for i in range(len(self.output_tensors.shape)-3):
-            num *= self.data.shape[i]
-
-        cout = self.output_tensors.shape[-3]
-        hout = self.output_tensors.shape[-2]
-        wout = self.output_tensors.shape[-1]
-
-        hfil = self.pooling_kernel[-2]
-        wfil = self.pooling_kernel[-1]
-
-        CMP = hfil * wfil *\
-                hout * wout * cout *\
-                num
-
-        dtypes = (self.data.dtype)
-        return {Ops.CMP(dtypes): CMP}
+        return {}
 
 
 class MaxPoolBackprop(GradOp):
@@ -950,6 +941,59 @@ class Add(NodeOp):
 
     def get_ops(self):
         return {}
+
+class CellState():
+    def __init__(self, data, node_name='Fork', dtype=None):
+
+        self.data = data
+        self.input_tensors = tuple([data])
+
+
+        if dtype is None:
+            dtype = data.dtype
+
+        self.dtype=dtype
+        
+        self.graph = get_default_graph()
+        self.op_type = self._get_op_type()
+        self.name = self.graph.get_op_name(node_name, self.op_type)
+        
+	self.output_tensors = self._create_output_tensors(self.name)
+	self.output_errors = self._create_output_tensors(self.name+'_bp')
+
+        self.graph.create_node(self)
+        
+        self.incoming_gradients = None
+
+    def _create_output_tensors(self, name):
+        out_name = name
+        t = self.graph.tensor(self._get_output_shape(), out_name, dtype=self.dtype, trainable=False)
+        t.op = self
+        return t
+
+    def _get_output_shape(self):
+        return self.data.shape
+
+    def _get_output_dtype(self):
+        return self.data.dtype
+
+    def _autograd(self, x, y, grad_dtype=FQDtype.FP32):
+        self.output_loss = self._get_incoming_gradients(y, grad_dtype=grad_dtype)
+        assert x in self.data, 'Op: {}, x: {}'.format(self.name, x.name)
+        for i in range(len(self.data)):
+            if x == self.data[i]:
+                if self.input_loss[i] is None:
+                    op = AddBackprop(data=self.data[i], output_loss=self.output_loss, node_name=self.name, dtype=grad_dtype)
+                    self.input_loss[i] = op.output_tensors
+                return self.input_loss[i]
+
+    def get_ops(self):
+        return {}
+
+    def _get_op_type(self):
+        return self.__class__.__name__
+
+
 
 class Fork():
     def __init__(self, data, node_name='Fork', dtype=None):
@@ -1410,25 +1454,21 @@ class ReLU(NodeOp):
         self.data = data
 
         input_tensors = (data)
+	self.dtype=dtype
 
 	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
 
-        self.dtype=dtype
+        
         super(ReLU, self).__init__(node_name=node_name, input_tensors=input_tensors)
 
     def _get_output_shape(self):
         return self.data.shape
 
     def _get_output_dtype(self):
-        return self.data.dtype
+        return self.dtype
 
     def get_ops(self):
-        mul_dtypes = (self.data.dtype, FixedPoint(16, 15))
-        rshift_dtype = FixedPoint(self.data.dtype.bits + 16, self.data.dtype.frac_bits + 15)
-        cmp_dtypes = (self.data.dtype)
-        return {Ops.MUL(mul_dtypes): self.data.size,
-                Ops.RSHIFT(rshift_dtype): self.data.size,
-                Ops.CMP(cmp_dtypes): self.data.size}
+        return {}
 
 class LeakyReLU(NodeOp):
     def __init__(self, data, scalar, node_name, dtype=None):
@@ -1524,10 +1564,7 @@ class BNorm(NodeOp):
 
         input_tensors = (data, gamma, beta)
 
-	if dtype==None:
-		self.dtype=data.dtype
-	else:
-        	self.dtype=dtype
+	self.dtype=dtype
 
 	self.output_errors = get_default_graph().tensor(self._get_output_shape(), get_default_graph().get_op_name(node_name, self._get_op_type())+'_bp', dtype=self._get_output_dtype(), trainable=False)
 	self.gamma_grads = get_default_graph().tensor(self.gamma.shape, self.gamma.name+'_gd', dtype=self.gamma.dtype, trainable=False)
@@ -1632,63 +1669,67 @@ def lstm_arith(c, of, oi, oc, oo, name=None, stride=None, pad='SAME', group=1, d
 def conv2D_bp(i, w, o, name=None, stride=None, pad='SAME', group=1, dtype=FQDtype.FP32):
     g = get_default_graph()
     op = Convolution_BP(i, w, o, name, stride=stride, pad=pad, group=group, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def maxPool(i, pooling_kernel, stride=(1,2,2,1), pad='VALID', name=None, dtype=FQDtype.FP32):
     g = get_default_graph()
     op = MaxPooling(i, pooling_kernel, name, stride=stride, pad=pad, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def averagePool(i, pooling_kernel, stride=(1,2,2,1), pad='VALID', name=None, dtype=FQDtype.FP32):
     g = get_default_graph()
     op = AveragePooling(i, pooling_kernel, name, stride=stride, pad=pad, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def flatten(i, name=None, dtype=None):
     g = get_default_graph()
     op = Flatten(i, name)
-    return typecast(op.output_tensors, FQDtype.FP32)
+    return op.output_tensors
 
 def matmul(i, w, b, name=None, dtype=None):
     g = get_default_graph()
     op = MatMul(i, w, b, name=name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def concat(data, concat_dim, name=None, dtype=FQDtype.FP32):
     op = Concat(data, concat_dim, name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def add(data, name=None, dtype=FQDtype.FP32):
     op = Add(data, name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def globalAvgPool(data, name=None, dtype=FQDtype.FP32):
     op = GlobalAvgPooling(data, name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def batch_norm(data, mean, scale, eps=0.000001, name=None, dtype=FQDtype.FP32):
     op = BatchNorm(data, mean, scale, eps=eps, node_name=name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def b_norm(data, gamma, beta, eps=1e-16, name=None, dtype=FQDtype.FP32):
     op = BNorm(data, gamma, beta, eps=eps, node_name=name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def reLU(data, name=None, dtype=FQDtype.FP32):
     op = ReLU(data, node_name=None)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def leakyReLU(data, name=None, alpha=0.1, dtype=FQDtype.FP32):
     if not isinstance(alpha, Tensor):
         alpha = get_tensor(shape=(1), name='alpha', data=alpha)
     op = LeakyReLU(data, alpha, node_name=None)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def reorg(data, reorg_kernel, name=None, dtype=FQDtype.FP32):
     op = Reorg(data, reorg_kernel, name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
 
 def fork(data, name=None, dtype=FQDtype.FP32):
     op = Fork(data, name, dtype=dtype)
-    return typecast(op.output_tensors, dtype)
+    return op.output_tensors
+
+def cell_state(data, name=None, dtype=FQDtype.FP32):
+    op = CellState(data, name, dtype=dtype)
+    return op.output_tensors
 

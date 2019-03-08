@@ -2,12 +2,16 @@ import logging
 from dnnweaver2.tensorOps.cnn import *
 from dnnweaver2.optimizer.optimizer import optimize_for_order, OP_TYPE
 
-from compiler_helpers import conv2instr, conv2instr_bp, lstm2instr, lstm_arithm_instr, lstm_arithm_bp_instr, bnorm2instr, bnorm2instr_bp, maxpool2instr, maxpool2instr_bp, eltwise_instr
+from compiler_helpers import conv2instr, lstm_arithm_instr, lstm_arithm_bp_instr, bnorm2instr, bnorm2instr_bp, maxpool2instr, maxpool2instr_bp, eltwise_instr
 from custom_isa import ACTType, MACType
 
 logger = logging.getLogger('{}.{}'.format(__name__, 'Compiler'))
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.ERROR)
 
+#In the original framework, all energy cost except dram is taken as zero. dram cost is taken as 6.e-3
+energy_cost = (0,0,0,0,0,0,0,0,0,0,6.e-3)
+
+lstm_activations = [ACTType.SIGMOID, ACTType.SIGMOID, ACTType.TANH, ACTType.SIGMOID]
 
 def next_op(op_dict, opname):
 	no_keys = len(op_dict.keys())
@@ -115,20 +119,17 @@ def compile_lstm(dir_name, graph, acc_obj):
 
 			K = wf.fpga_shape[-2]
 			O = out_f.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = wf.fpga_shape[-1]
 			OC = wf.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 4 #There are 4 gates in an LSTM cell (4 parallel FC layers)
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
-			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = lstm2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False)
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.LSTM_FW)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, conv_params, op_type=OP_TYPE.LSTM_FW, mac_type=MACType.FC, activation=lstm_activations)
 
 		elif isinstance(op, LSTM_ARITH):
 			Cin = op.input_tensors[0]
@@ -153,7 +154,7 @@ def compile_lstm(dir_name, graph, acc_obj):
 			logger.debug('tensor_ids:{}'.format(tensor_ids))
 			
 			H = Cin.shape[-1]
-			lstm_arithm_instr(instr, dir_name, name, tensor_ids, H, acc_obj)
+			lstm_arithm_instr(instr, dir_name, filename, tensor_ids, H, acc_obj)
 
 		elif isinstance(op, Fork):
 			tensor_id[op.output_tensors[0].name] = tensor_id[op.input_tensors[0].name]
@@ -175,27 +176,23 @@ def compile_lstm(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, conv_params, op_type=OP_TYPE.FW, mac_type=MACType.FC, activation=None)
 
 		elif isinstance(op, CellState):
 			tensor_id[op.output_tensors.name] = tensor_id[op.input_tensors[0].name]
 
 		else:
-			assert False
-
+			assert False, 'Graph node not implemented, revisit the code'
 
 		f = open(dir_name+"lstm.bin", "ab")
 		instr_bin = bytearray(instr)
@@ -247,29 +244,25 @@ def compile_lstm_bp(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
 			#error -> grads
-			tensor_ids = (tensor_id[out_error.name], tensor_id[data.name], None, tensor_id[w_grad.name])
+			tensor_ids = (tensor_id[data.name], tensor_id[w_grad.name], None, tensor_id[out_error.name])
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.GD)
-			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=True)
+			instr = conv2instr(instr, stats, dir_name, filename+'_gd', tensor_ids, conv_params, op_type=OP_TYPE.GD, mac_type=MACType.FC, activation=None)
 
 			#error -> prev. error
 			prev_error = get_src_error(data, op_dict)
-			print('prev_error:{}'.format(prev_error.name))
-			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[prev_error.name])
-			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
+			tensor_ids = (tensor_id[prev_error.name], tensor_id[weight.name], None, tensor_id[out_error.name])
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.BP)
+			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, conv_params, op_type=OP_TYPE.BP, mac_type=MACType.FC, activation=None)
 
 		elif isinstance(op, Fork):
 			O = op.output_tensors[0].fpga_shape[-2]
@@ -313,6 +306,107 @@ def compile_lstm_bp(dir_name, graph, acc_obj):
 			H = Cin.shape[-1]
 
 			instr = lstm_arithm_bp_instr(instr, dir_name, filename, tensor_ids, H, acc_obj)
+
+
+		elif isinstance(op, LSTM_FC):
+			data = op.input_tensors[0]
+			wf = op.input_tensors[1]
+			wi = op.input_tensors[2]
+			wc = op.input_tensors[3]
+			wo = op.input_tensors[4]
+			bf = op.input_tensors[5]
+			bi = op.input_tensors[6]
+			bc = op.input_tensors[7]
+			bo = op.input_tensors[8]
+
+			out_f = op.output_tensors[0]
+			out_i = op.output_tensors[1]
+			out_c = op.output_tensors[2]
+			out_o = op.output_tensors[3]
+
+
+			data = op.input_tensors[0]
+			wf = op.input_tensors[1]
+			wi = op.input_tensors[2]
+			wc = op.input_tensors[3]
+			wo = op.input_tensors[4]
+			wf_grad = op.weight_grads[0]
+			wi_grad = op.weight_grads[1]
+			wc_grad = op.weight_grads[2]
+			wo_grad = op.weight_grads[3]
+
+			bf = op.input_tensors[5]
+			bi = op.input_tensors[6]
+			bc = op.input_tensors[7]
+			bo = op.input_tensors[8]
+
+			out_f = op.output_tensors[0]
+			out_i = op.output_tensors[1]
+			out_c = op.output_tensors[2]
+			out_o = op.output_tensors[3]
+			out_f_bp = op.output_errors[0]
+			out_i_bp = op.output_errors[1]
+			out_c_bp = op.output_errors[2]
+			out_o_bp = op.output_errors[3]
+
+			K = wf.fpga_shape[-2]
+			O = out_f.fpga_shape[-2]
+			S = op.stride[-2]
+			IC = wf.fpga_shape[-1]
+			OC = wf.fpga_shape[-4]
+			B = data.fpga_shape[-4]
+			G = 4 #There are 4 gates in an LSTM cell (4 parallel FC layers)
+			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
+
+			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
+
+			tensor_ids = []
+			tensor_ids.append(tensor_id[data.name])
+			tensor_ids.append(tensor_id[wf_grad.name])
+			tensor_ids.append(tensor_id[wi_grad.name])
+			tensor_ids.append(tensor_id[wc_grad.name])
+			tensor_ids.append(tensor_id[wo_grad.name])
+			tensor_ids.append(None)			
+			tensor_ids.append(None)	
+			tensor_ids.append(None)	
+			tensor_ids.append(None)	
+			tensor_ids.append(tensor_id[out_f_bp.name])			
+			tensor_ids.append(tensor_id[out_i_bp.name])	
+			tensor_ids.append(tensor_id[out_c_bp.name])	
+			tensor_ids.append(tensor_id[out_o_bp.name])	
+
+			tensor_ids = tuple(tensor_ids)
+			logger.debug('tensor_ids:{}'.format(tensor_ids))
+
+			#error -> grads
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.LSTM_GD)
+			instr = conv2instr(instr, stats, dir_name, filename+'_gd', tensor_ids, conv_params, op_type=OP_TYPE.LSTM_GD, mac_type=MACType.FC, activation=None)
+
+
+			#error -> prev. error
+			prev_error = get_src_error(data, op_dict)
+
+
+			tensor_ids = []
+			tensor_ids.append(tensor_id[prev_error.name])
+			tensor_ids.append(tensor_id[wf.name])
+			tensor_ids.append(tensor_id[wi.name])
+			tensor_ids.append(tensor_id[wc.name])
+			tensor_ids.append(tensor_id[wo.name])
+			tensor_ids.append(None)	
+			tensor_ids.append(None)	
+			tensor_ids.append(None)	
+			tensor_ids.append(None)	
+			tensor_ids.append(tensor_id[out_f_bp.name])			
+			tensor_ids.append(tensor_id[out_i_bp.name])	
+			tensor_ids.append(tensor_id[out_c_bp.name])	
+			tensor_ids.append(tensor_id[out_o_bp.name])	
+
+			tensor_ids = tuple(tensor_ids)
+			logger.debug('tensor_ids:{}'.format(tensor_ids))
+
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.LSTM_BP)
+			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, conv_params, op_type=OP_TYPE.LSTM_BP, mac_type=MACType.FC, activation=None)
 
 		elif isinstance(op, CellState):
 			tensor_id[op.output_tensors.name] = tensor_id[op.input_tensors[0].name]
@@ -369,20 +463,17 @@ def compile_graph(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.CONV, activation=None, transpose_weight=False)
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, conv_params, op_type=OP_TYPE.FW, mac_type=MACType.CONV, activation=None)
 
 		elif isinstance(op, BNorm):
 			tensor_ids = (tensor_id[op.input_tensors[0].name], tensor_id[op.input_tensors[1].name], tensor_id[op.input_tensors[2].name], tensor_id[op.output_tensors.name])
@@ -450,21 +541,17 @@ def compile_graph(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
-
+			instr = conv2instr(instr, stats, dir_name, filename, tensor_ids, conv_params, op_type=OP_TYPE.FW, mac_type=MACType.FC, activation=None)
 		else:
 			print('Ineffective layer:{} Connecting input to output:'.format(opname))
 			tensor_id[op.output_tensors.name] = tensor_id[op.input_tensors[0].name]
@@ -477,7 +564,8 @@ def compile_graph(dir_name, graph, acc_obj):
 		f.close()
 		instr = []
 
-
+# https://www.jefkine.com/general/2016/09/05/backpropagation-in-convolutional-neural-networks/
+# http://neuralnetworksanddeeplearning.com/chap2.html
 def compile_graph_bp(dir_name, graph, acc_obj):
 	f = open(dir_name+"resnet50.bin", "wb")
 	f.close()
@@ -503,7 +591,7 @@ def compile_graph_bp(dir_name, graph, acc_obj):
 
 	for opname in reversed(op_dict):
 		op = op_dict[opname]
-		print('Op name: {}'.format(opname))
+		print('Op name: {}_bp'.format(opname))
 		filename = opname.replace("/","_")
 
 		if isinstance(op, FC):
@@ -521,28 +609,25 @@ def compile_graph_bp(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
 			#error -> grads
-			tensor_ids = (tensor_id[out_error.name], tensor_id[data.name], None, tensor_id[w_grad.name])
+			tensor_ids = (tensor_id[data.name], tensor_id[w_grad.name], None, tensor_id[out_error.name])
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.GD)
-			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=True)
+			instr = conv2instr(instr, stats, dir_name, filename+'_gd', tensor_ids, conv_params, op_type=OP_TYPE.GD, mac_type=MACType.FC, activation=None)
 
 			#error -> prev. error
 			prev_error = get_src_error(data, op_dict)
-			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[prev_error.name])
-			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, mac_type=MACType.FC, activation=None, transpose_weight=False)
+			tensor_ids = (tensor_id[prev_error.name], tensor_id[weight.name], None, tensor_id[out_error.name])
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.BP)
+			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, conv_params, op_type=OP_TYPE.BP, mac_type=MACType.FC, activation=None)
 
 		elif isinstance(op, MaxPooling):
 			O = op.output_tensors.fpga_shape[-2]
@@ -610,30 +695,30 @@ def compile_graph_bp(dir_name, graph, acc_obj):
 
 			K = weight.fpga_shape[-2]
 			O = out.fpga_shape[-2]
-			S = op.stride[-1]
+			S = op.stride[-2]
 			IC = weight.fpga_shape[-1]
 			OC = weight.fpga_shape[-4]
 			B = data.fpga_shape[-4]
 			G = 1 #There are 4 gates in an LSTM cell (4 parallel FC layers), 1 is equal to conventional layers
 			logger.debug('K:{} O:{} S:{} IC:{} OC:{} B:{} G:{}'.format(K,O,S,IC,OC,B,G))
 
-			#energy_cost and im2col are hardcoded
-			energy_cost = (0,0,0,0,0,0,0,0,0,0)
-			im2col = False
 			conv_params = (acc_obj, K, O, S, IC, OC, B, G, energy_cost)
 
+
 			#error -> grads
-			tensor_ids = (tensor_id[out_error.name], tensor_id[data.name], None, tensor_id[w_grad.name])
+			tensor_ids = (tensor_id[data.name], tensor_id[w_grad.name], None, tensor_id[out_error.name])
 			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.GD)
-			instr = conv2instr_bp(instr, stats, dir_name, filename+'_grad', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, activation=None)
+			instr = conv2instr(instr, stats, dir_name, filename+'_gd', tensor_ids, conv_params, op_type=OP_TYPE.GD, mac_type=MACType.CONV, activation=None)
+
 
 			#error -> prev. error
 			prev_error = get_src_error(data, op_dict)
 			if prev_error==None:
 				break #We reached the input layer
-			tensor_ids = (tensor_id[out_error.name], tensor_id[weight.name], None, tensor_id[prev_error.name])
-			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.FW)
-			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, O, O, OC, IC, B, K, S, acc_obj, None)
+
+			tensor_ids = (tensor_id[prev_error.name], tensor_id[weight.name], None, tensor_id[out_error.name])
+			_, _, stats = optimize_for_order(conv_params, sequential=False, op_type=OP_TYPE.BP)
+			instr = conv2instr(instr, stats, dir_name, filename+'_bp', tensor_ids, conv_params, op_type=OP_TYPE.BP, mac_type=MACType.CONV, activation=None)
 
 		elif isinstance(op, Add):
 			prev_error1 = get_src_error(op.input_tensors[0], op_dict)

@@ -55,7 +55,7 @@ class Accelerator(object):
         return compute_stats
 
 
-    def get_compute_cycles(self, ic, oc, ow, oh, b, kw, kh, im2col=False):
+    def get_compute_cycles(self, ic, oc, ow, oh, b, kw, kh, g=1, im2col=False):
         """
         Compute instruction
         args:
@@ -72,7 +72,7 @@ class Accelerator(object):
         _oc = ceil_a_by_b(oc, self.M)
         _ic = ceil_a_by_b(ic, self.N)
 
-        loops = (b, _oc, oh, ow, kh, kw, _ic)
+        loops = (b, _oc, oh, ow, kh, kw, _ic, g)
         loops = sorted(loops, reverse=True)
 
         overhead = 2

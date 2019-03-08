@@ -57,7 +57,18 @@ class Stats(object):
         return ret
 
     def get_energy(self, energy_cost, dram_cost=6.e-3):
-        leak_cost, core_dyn_cost, wbuf_read_cost, wbuf_write_cost, ibuf_read_cost, ibuf_write_cost, bbuf_read_cost, bbuf_write_cost, obuf_read_cost, obuf_write_cost = energy_cost
+        leak_cost, core_dyn_cost, wbuf_read_cost, wbuf_write_cost, ibuf_read_cost, ibuf_write_cost, bbuf_read_cost, bbuf_write_cost, obuf_read_cost, obuf_write_cost, dram_cost = energy_cost
+	assert leak_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert core_dyn_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert wbuf_read_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert wbuf_write_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert ibuf_read_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert ibuf_write_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert bbuf_read_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert bbuf_write_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert obuf_read_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+	assert obuf_write_cost==0, 'on-chip memory read energy is not implemented (Ahmet)'
+
         dyn_energy = (self.total_cycles - self.mem_stall_cycles) * core_dyn_cost
 
         dyn_energy += self.reads['wbuf'] * wbuf_read_cost

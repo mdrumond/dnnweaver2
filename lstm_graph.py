@@ -9,7 +9,7 @@ from dnnweaver2.fpga.fpgamanager import FPGAManager
 
 from dnnweaver2.scalar.dtypes import FixedPoint
 
-from compiler import compile_graph, compile_graph_bp, compile_lstm
+from compiler import compile_lstm, compile_lstm_bp
 from compiler_helpers import decode_instr
 
 graph = Graph('LSTM', dataset='imagenet', log_level=logging.INFO)
@@ -52,8 +52,12 @@ with graph.as_default():
 	with graph.name_scope('inputs'):
 		z = get_tensor(shape=(batch_size,1,1,H+X), name='z', trainable=False)
 		Cin = get_tensor(shape=(batch_size,1,1,H), name='Cin', trainable=False)
-	
-	with graph.name_scope('fc'):
+
+	with graph.name_scope('cell_state'):
+		Cin = cell_state(Cin)
+		z = cell_state(z)
+
+	with graph.name_scope('inner_fc'):
 		wf = get_tensor(shape=(H, 1, 1, H+X),
 				     name='wf')
 		bf = get_tensor(shape=(H),
@@ -78,17 +82,17 @@ with graph.as_default():
 
 	with graph.name_scope('arithmetics'):
 		Cout, hout = lstm_arith(Cin, of, oi, oc, oo)
+		hout1, hout2 = fork(hout)
 
 	with graph.name_scope('output'):
 		weights = get_tensor(shape=(X, 1, 1, H),
 				     name='weights')
 		biases = get_tensor(shape=(X),
 				     name='biases')
-		fc = fc(hout, weights, biases, stride=(1,1,1,1), pad='SAME')		
-	
+		fc = fc(hout1, weights, biases, stride=(1,1,1,1), pad='SAME')
 
 compile_lstm('lstm/', graph, acc_obj)
-
+compile_lstm_bp('lstm_bp/', graph, acc_obj)
 
 
 

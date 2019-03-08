@@ -21,7 +21,6 @@ import keras
 
 def get_inbound_tensor(l,output_tensors,out_ind=0):
 	no_inbound = len(l._inbound_nodes[0].inbound_layers)
-	print('no_inbound:{}'.format(no_inbound))
 	if no_inbound==1:
 		out_tensor = output_tensors[l._inbound_nodes[0].inbound_layers[0].name]
 		if isinstance(out_tensor, list):
@@ -59,8 +58,8 @@ num_rows = 2
 num_cols = 2
 
 bram = {
-    'ibuf':            num_cols * iprec * 2048 / 2,
-    'obuf':            num_rows * oprec * 2048 / 2,
+    'ibuf':            10*num_cols * iprec * 2048 / 2,
+    'obuf':            10*num_rows * oprec * 2048 / 2,
     'wbuf': num_cols * num_rows * wprec *  512 / 2,
     'bbuf':            num_rows * bprec * 2048 / 2,
 }
