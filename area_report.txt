@@ -1,0 +1,105 @@
+POWER REPORT:
+
+1 MAC unit with 1.0 toggle_rate 1.0ns period
+
+
+Global Operating Voltage = 0.81 
+Power-specific unit information :
+    Voltage Units = 1V
+    Capacitance Units = 1.000000pf
+    Time Units = 1ns
+    Dynamic Power Units = 1mW    (derived from V,C,T units)
+    Leakage Power Units = 1nW
+
+
+  Cell Internal Power  = 538.3191 uW   (89%)
+  Net Switching Power  =  64.0655 uW   (11%)
+                         ---------
+Total Dynamic Power    = 602.3845 uW  (100%)
+
+Cell Leakage Power     =   4.2112 uW
+
+
+                 Internal         Switching           Leakage            Total
+Power Group      Power            Power               Power              Power   (   %    )  Attrs
+--------------------------------------------------------------------------------------------------
+io_pad             0.0000            0.0000            0.0000            0.0000  (   0.00%)
+memory             0.0000            0.0000            0.0000            0.0000  (   0.00%)
+black_box          0.0000            0.0000            0.0000            0.0000  (   0.00%)
+clock_network      0.0000            0.0000            0.0000            0.0000  (   0.00%)
+register           0.2951        7.3083e-03        1.2776e+03            0.3036  (  50.06%)
+sequential         0.0000            0.0000            0.0000            0.0000  (   0.00%)
+combinational      0.2433        5.6757e-02        2.9336e+03            0.3030  (  49.94%)
+--------------------------------------------------------------------------------------------------
+Total              0.5383 mW     6.4065e-02 mW     4.2112e+03 nW         0.6066 mW
+
+
+
+AREA REPORT:
+
+
+2 x 2, 1-bit addr BRAM, timing constraint: 1.0ns
+
+Number of ports:                          100
+Number of nets:                           229
+Number of cells:                           71
+Number of combinational cells:              1
+Number of sequential cells:                64
+Number of macros/black boxes:               0
+Number of buf/inv:                          0
+Number of references:                       8
+
+Combinational area:                918.783004
+Buf/Inv area:                       31.468500
+Noncombinational area:             870.912010
+Macro/Black Box area:                0.000000
+Net Interconnect area:      undefined  (Wire load has zero net area)
+
+Total cell area:                  1789.695015
+Total area:                 undefined
+
+
+
+4 x 4, 1-bit addr BRAM, timing constraint: 1.0ns
+
+Number of ports:                          324
+Number of nets:                           709
+Number of cells:                          149
+Number of combinational cells:              1
+Number of sequential cells:               128
+Number of macros/black boxes:               0
+Number of buf/inv:                          0
+Number of references:                      22
+
+Combinational area:               3511.957525
+Buf/Inv area:                      136.080000
+Noncombinational area:            3257.415043
+Macro/Black Box area:                0.000000
+Net Interconnect area:      undefined  (Wire load has zero net area)
+
+Total cell area:                  6769.372568
+Total area:                 undefined
+
+
+8 x 8, 1-bit addr BRAM, timing constraint: 1.0ns
+
+Number of ports:                         1156
+Number of nets:                          2437
+Number of cells:                          329
+Number of combinational cells:              1
+Number of sequential cells:               256
+Number of macros/black boxes:               0
+Number of buf/inv:                          0
+Number of references:                      75
+
+Combinational area:              13718.200590
+Buf/Inv area:                      540.431999
+Noncombinational area:           12534.912170
+Macro/Black Box area:                0.000000
+Net Interconnect area:      undefined  (Wire load has zero net area)
+
+Total cell area:                 26253.112760
+Total area:                 undefined
+
+
+
